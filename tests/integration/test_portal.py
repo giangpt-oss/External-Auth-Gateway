@@ -191,3 +191,68 @@ def test_calendar_sync_csrf_validation(portal_client):
     )
     assert bad_res.status_code == 403
     assert "Invalid CSRF token" in bad_res.json()["detail"]
+
+
+def test_portal_telegram_disconnect_html_redirect(portal_client, temp_db_path):
+    client, session_factory = portal_client
+    mock_odoo = MagicMock()
+    mock_odoo.authenticate.return_value = 77
+    mock_odoo.execute.return_value = [
+        {
+            "id": 77,
+            "name": "Nguyễn Văn A",
+            "login": "portal_user@company.com",
+            "active": True,
+            "share": False,
+            "tz": "Asia/Bangkok",
+            "partner_id": [77, "Nguyễn Văn A"],
+        }
+    ]
+    client.app.state.odoo_client = mock_odoo
+
+    # Add a connected telegram connection
+    from app.models import TelegramConnection
+    with session_factory() as db:
+        user = db.query(User).filter_by(login="portal_user@company.com").first()
+        db.add(
+            TelegramConnection(
+                user_id=user.id,
+                telegram_user_id=888999,
+                private_chat_id=888999,
+                username="test_tele_user",
+                status="connected",
+            )
+        )
+        db.commit()
+
+    # 1. Login
+    login_page = client.get("/login")
+    import re
+    csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', login_page.text)
+    client.post(
+        "/auth/login",
+        data={
+            "login": "portal_user@company.com",
+            "secret": "valid_secret",
+            "credential_kind": "api_key",
+            "csrf_token": csrf_match.group(1),
+        },
+        headers={"Accept": "text/html"},
+    )
+
+    # 2. Form submission from portal to /connections/telegram/disconnect
+    # Browser sends Content-Type: application/x-www-form-urlencoded and Accept: text/html
+    res = client.post(
+        "/connections/telegram/disconnect",
+        data={"csrf_token": "dummy"},
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    # Must redirect (303) back to dashboard, NOT return 200 with raw JSON
+    assert res.status_code == 303
+    assert res.headers["location"] == "/"
+
+    # 3. Verify status in DB is disconnected
+    with session_factory() as db:
+        conn = db.query(TelegramConnection).filter_by(telegram_user_id=888999).first()
+        assert conn.status == "disconnected"

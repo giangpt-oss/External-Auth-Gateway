@@ -251,6 +251,7 @@ class ActionOperation(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     action = Column(String(64), nullable=False)
     payload_hash = Column(String(64), nullable=False)
+    telegram_binding_id = Column(String(64), nullable=True)
     status = Column(
         String(32), default="in_progress", nullable=False
     )  # 'in_progress', 'completed', 'unknown_result', 'failed'

@@ -142,6 +142,7 @@ def api_test_setup(tmp_path):
         APP_ENV="test",
         DATABASE_URL=f"sqlite:///{db_path}",
         ENCRYPTION_KEY=encryption_key,
+        ENABLE_AI_AGENT_FORWARDING=False,
         AGENT_TO_GATEWAY_SECRET="test_secret",
         TELEGRAM_BOT_TOKEN="mock_token",
     )

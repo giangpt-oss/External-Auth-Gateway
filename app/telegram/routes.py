@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.auth.routes import get_current_user
 from app.auth.service import AuthenticatedUser
@@ -55,17 +55,23 @@ def create_telegram_link(
 
 @router.post("/connections/telegram/disconnect")
 def disconnect_telegram(
+    request: Request,
     current_user: AuthenticatedUser = Depends(get_current_user),
     telegram_service: TelegramService = Depends(get_telegram_service),
 ):
     telegram_service.disconnect(user_id=current_user.id)
+    is_html = "text/html" in request.headers.get("Accept", "") or "form" in request.headers.get(
+        "Content-Type", ""
+    )
+    if is_html:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
     return {"status": "success", "message": "Telegram disconnected successfully"}
 
 
 @router.post("/connections/telegram/test")
 def send_test_message(
+    request: Request,
     current_user: AuthenticatedUser = Depends(get_current_user),
-    request: Request = None,
     telegram_client: TelegramClient = Depends(get_telegram_client),
 ):
     session_factory = request.app.state.session_factory
@@ -76,6 +82,11 @@ def send_test_message(
             .first()
         )
         if not conn:
+            is_html = "text/html" in request.headers.get("Accept", "") or "form" in request.headers.get(
+                "Content-Type", ""
+            )
+            if is_html:
+                return RedirectResponse(url="/?error=telegram_not_connected", status_code=status.HTTP_303_SEE_OTHER)
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={
@@ -92,6 +103,11 @@ def send_test_message(
         f"Xin chào <b>{current_user.name}</b>, kết nối Telegram của bạn đang hoạt động bình thường!"
     )
     telegram_client.send_message(chat_id, test_text)
+    is_html = "text/html" in request.headers.get("Accept", "") or "form" in request.headers.get(
+        "Content-Type", ""
+    )
+    if is_html:
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
     return {"status": "success", "message": "Đã gửi tin nhắn thử nghiệm thành công"}
 
 

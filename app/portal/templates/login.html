@@ -16,12 +16,12 @@
     </div>
     {% endif %}
 
-    <form action="/auth/login" method="POST">
+    <form action="/auth/login" method="POST" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
       <div class="form-group">
         <label for="login">Email Odoo của bạn</label>
-        <input type="email" id="login" name="login" required placeholder="nhanvien@congty.com" autocomplete="email" autofocus>
+        <input type="email" id="login" name="login" required placeholder="nhanvien@congty.com" autocomplete="off" autofocus>
       </div>
 
       <div class="form-group">
@@ -35,7 +35,7 @@
 
       <div class="form-group">
         <label for="secret">Mật khẩu hoặc API Key</label>
-        <input type="password" id="secret" name="secret" required placeholder="••••••••••••" autocomplete="current-password">
+        <input type="password" id="secret" name="secret" required placeholder="Nhập mật khẩu hoặc API Key" autocomplete="new-password">
       </div>
 
       <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem; padding: 0.75rem;">

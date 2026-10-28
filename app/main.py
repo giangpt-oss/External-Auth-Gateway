@@ -91,7 +91,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 and "dummy" not in settings.TELEGRAM_BOT_TOKEN
             ):
                 import threading
-                import time
 
                 import httpx
 
@@ -110,21 +109,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     api_url = (
                         f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/getUpdates"
                     )
-                    while not poller_stop_event.is_set():
-                        try:
-                            params = {"timeout": 3}
-                            if offset is not None:
-                                params["offset"] = offset
-                            resp = httpx.get(api_url, params=params, timeout=6.0)
-                            if resp.status_code == 200:
-                                data = resp.json()
-                                if data.get("ok"):
-                                    for up in data.get("result", []):
-                                        tele_svc.ingest_update(up)
-                                        offset = up["update_id"] + 1
-                        except Exception:
-                            pass
-                        time.sleep(1)
+                    with httpx.Client(timeout=30.0) as client:
+                        while not poller_stop_event.is_set():
+                            try:
+                                params = {"timeout": 20}
+                                if offset is not None:
+                                    params["offset"] = offset
+                                resp = client.get(api_url, params=params)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    if data.get("ok"):
+                                        updates = data.get("result", [])
+                                        for up in updates:
+                                            tele_svc.ingest_update(up)
+                                            offset = up["update_id"] + 1
+                                        if not updates:
+                                            poller_stop_event.wait(0.1)
+                                else:
+                                    poller_stop_event.wait(1.5)
+                            except httpx.TimeoutException:
+                                # Normal long-polling cycle completed without new updates
+                                continue
+                            except Exception:
+                                poller_stop_event.wait(1.0)
 
                 p_thread = threading.Thread(
                     target=_poll_worker, daemon=True, name="DevTelegramPoller"

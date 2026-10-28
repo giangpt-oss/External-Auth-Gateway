@@ -107,6 +107,15 @@ def init_db(db_url: str) -> tuple[Engine, sessionmaker]:
         except Exception:
             pass
 
+        try:
+            res_op = conn.execute(text("PRAGMA table_info(action_operations)"))
+            op_cols = [r[1] for r in res_op.fetchall()]
+            if op_cols and "telegram_binding_id" not in op_cols:
+                conn.execute(text("ALTER TABLE action_operations ADD COLUMN telegram_binding_id VARCHAR(64)"))
+                conn.commit()
+        except Exception:
+            pass
+
     session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return engine, session_factory
 

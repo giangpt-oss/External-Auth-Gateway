@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.google.client import GoogleClient
 from app.google.oauth import GoogleOAuthService
+from app.internal.cache import identity_cache
 from app.internal.security import verify_agent_secret
 from app.models import ActionOperation, TelegramConnection, User
 from app.odoo.client import (
@@ -154,30 +155,53 @@ def resolve_identity(
                 except Exception:
                     secret = ""
 
-            odoo_svc = _get_odoo_service(request, user)
-            # Xác minh Odoo account trước khi cấp quyền
-            _verify_odoo_account(odoo_svc, user.odoo_uid, secret)
-
-            job_title = None
-            department = None
-            manager_name = None
-            if odoo_svc and secret:
-                profile = odoo_svc.get_employee_profile(user.odoo_uid, secret)
-                job_title = profile.get("job_title")
-                department = profile.get("department")
-                manager_name = profile.get("manager_name")
-
             g_conn = user.google_connection
             g_status = g_conn.status if g_conn else "disconnected"
             g_scopes = g_conn.scopes.split() if g_conn and g_conn.scopes else []
 
-            permissions = odoo_svc.compute_permissions(
-                uid=user.odoo_uid,
-                secret=secret,
-                is_internal_user=bool(user.active),
-                google_status=g_status,
-                google_scopes=g_scopes,
-            )
+            secret_hash = hashlib.sha256(secret.encode()).hexdigest()
+            scopes_key = ",".join(sorted(g_scopes))
+            cache_key = f"{user.id}:{user.tenant}:{user.database}:{user.odoo_uid}:{secret_hash}:{g_status}:{scopes_key}"
+
+            cached = identity_cache.get(cache_key)
+            if cached:
+                job_title = cached.get("job_title")
+                department = cached.get("department")
+                manager_name = cached.get("manager_name")
+                permissions = cached.get("permissions", [])
+                auth_checked_at = cached.get("authorization_checked_at") or datetime.now(UTC).isoformat()
+            else:
+                odoo_svc = _get_odoo_service(request, user)
+                # Xác minh Odoo account trước khi cấp quyền
+                _verify_odoo_account(odoo_svc, user.odoo_uid, secret)
+
+                job_title = None
+                department = None
+                manager_name = None
+                if odoo_svc and secret:
+                    profile = odoo_svc.get_employee_profile(user.odoo_uid, secret)
+                    job_title = profile.get("job_title")
+                    department = profile.get("department")
+                    manager_name = profile.get("manager_name")
+
+                permissions = odoo_svc.compute_permissions(
+                    uid=user.odoo_uid,
+                    secret=secret,
+                    is_internal_user=bool(user.active),
+                    google_status=g_status,
+                    google_scopes=g_scopes,
+                )
+                auth_checked_at = datetime.now(UTC).isoformat()
+                identity_cache.set(
+                    cache_key,
+                    {
+                        "job_title": job_title,
+                        "department": department,
+                        "manager_name": manager_name,
+                        "permissions": permissions,
+                        "authorization_checked_at": auth_checked_at,
+                    },
+                )
 
             return {
                 "contract_version": 2,
@@ -194,7 +218,7 @@ def resolve_identity(
                 "department": department,
                 "manager_name": manager_name,
                 "permissions": permissions,
-                "authorization_checked_at": datetime.now(UTC).isoformat(),
+                "authorization_checked_at": auth_checked_at,
             }
 
         return {
@@ -520,6 +544,7 @@ def execute_user_action(
                 action=req.action,
                 payload_hash=payload_hash,
                 status="in_progress",
+                telegram_binding_id=req.telegram_binding_id,
             )
             db.add(op)
             db.commit()
@@ -783,6 +808,134 @@ def execute_user_action(
             op.error_message = str(e)
             db.commit()
             return {"status": "SERVICE_ERROR", "message": str(e)}
+
+
+@router.get("/users/{user_id}/actions/{operation_id}")
+def get_user_action_status(
+    user_id: int,
+    operation_id: str,
+    telegram_user_id: int = Query(...),
+    chat_id: int = Query(...),
+    telegram_binding_id: str = Query(...),
+    request: Request = None,
+):
+    """Đọc trạng thái thao tác ghi từ sổ ActionOperation phục vụ đối soát.
+
+    Quy tắc an toàn:
+    - Chỉ đọc ledger; tuyệt đối không tạo operation hoặc gọi provider ghi.
+    - Kiểm tra user, Telegram binding và quyền hiện tại.
+    - Operation cũ thiếu binding không tự động trả kết quả chi tiết.
+    - Trả 'not_found' nếu chưa có trong sổ (không đồng nghĩa thao tác chưa từng xảy ra).
+    """
+    session_factory = request.app.state.session_factory
+    with session_factory() as db:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user or not user.active:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "USER_NOT_FOUND", "message": "User not found or inactive"},
+            )
+
+        tele_conn = user.telegram_connection
+        if (
+            not tele_conn
+            or tele_conn.telegram_user_id != telegram_user_id
+            or tele_conn.private_chat_id != chat_id
+            or tele_conn.binding_id != telegram_binding_id
+            or tele_conn.status != "connected"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "TELEGRAM_BINDING_MISMATCH", "message": "Telegram binding mismatch or disconnected"},
+            )
+
+        op = db.query(ActionOperation).filter_by(user_id=user_id, operation_id=operation_id).first()
+        if not op:
+            return {
+                "operation_id": operation_id,
+                "action": None,
+                "status": "not_found",
+                "result": None,
+                "updated_at": None,
+            }
+
+        # Nếu operation đã lưu binding khác với binding đang yêu cầu -> từ chối
+        if op.telegram_binding_id and op.telegram_binding_id != telegram_binding_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "BINDING_MISMATCH", "message": "Operation belongs to another binding"},
+            )
+
+        # Xác minh tài khoản Odoo và quyền action hiện tại giống logic của POST
+        settings = getattr(request.app.state, "settings", None)
+        if not settings:
+            from app.config import get_settings
+            settings = get_settings()
+
+        secret = ""
+        if user.credential and user.credential.encrypted_secret and settings.ENCRYPTION_KEY:
+            try:
+                secret = decrypt_secret(user.credential.encrypted_secret, settings.ENCRYPTION_KEY)
+            except Exception:
+                secret = ""
+
+        odoo_svc = _get_odoo_service(request, user)
+        # _verify_odoo_account kiểm tra secret và trạng thái Odoo; ném 403 hoặc 503
+        _verify_odoo_account(odoo_svc, user.odoo_uid, secret)
+
+        if op.action:
+            action_perm_map = {
+                "calendar.create": "calendar.write",
+                "calendar.update": "calendar.write",
+                "gmail.send": "gmail.send",
+                "crm.create": "crm.create",
+                "crm.update": "crm.write",
+            }
+            if op.action in action_perm_map:
+                needed_perm = action_perm_map[op.action]
+                g_conn = user.google_connection
+                g_status = g_conn.status if g_conn else "disconnected"
+                g_scopes = g_conn.scopes.split() if g_conn and g_conn.scopes else []
+
+                permissions = set(
+                    odoo_svc.compute_permissions(
+                        uid=user.odoo_uid,
+                        secret=secret,
+                        is_internal_user=bool(user.active),
+                        google_status=g_status,
+                        google_scopes=g_scopes,
+                    )
+                )
+                if needed_perm not in permissions:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail={
+                            "code": "PERMISSION_DENIED",
+                            "message": f"Tài khoản hiện không có quyền cho action '{op.action}' (yêu cầu {needed_perm}).",
+                        },
+                    )
+
+        # Trích xuất result nếu có
+        res_data = None
+        if op.status == "completed" and op.result_json:
+            # Nếu là operation cũ không có telegram_binding_id -> không tự động trả nội dung kết quả
+            if not op.telegram_binding_id:
+                res_data = None
+            else:
+                try:
+                    parsed = json.loads(op.result_json)
+                    res_data = parsed.get("result") if isinstance(parsed, dict) and "result" in parsed else parsed
+                except Exception:
+                    res_data = None
+
+        up_at = op.updated_at or op.created_at
+        return {
+            "operation_id": op.operation_id,
+            "action": op.action,
+            "status": op.status,
+            "result": res_data,
+            "updated_at": up_at.isoformat() if up_at else None,
+        }
 
 
 @router.get("/users/{user_id}/calendar/events/{event_id}")

@@ -127,7 +127,10 @@ def test_worker_processes_pending_and_delivers(temp_db_path, fernet_key):
     )
 
     with patch("httpx.post", return_value=MockResp()) as mock_http:
-        with patch("app.telegram.client.TelegramClient.send_message") as mock_tele:
+        with (
+            patch("app.telegram.client.TelegramClient.send_message") as mock_tele,
+            patch("app.telegram.client.TelegramClient.send_chat_action"),
+        ):
             # Process one item
             processed_count = worker.process_pending_once()
             assert processed_count == 1

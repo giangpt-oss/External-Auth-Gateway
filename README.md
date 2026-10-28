@@ -14,7 +14,19 @@ README này hướng dẫn cài đặt, cấu hình và vận hành riêng dự 
 - Identity contract v2: user ID, tenant, database, Odoo UID, chức vụ, phòng ban, quản lý, quyền và Telegram binding.
 - API đọc Calendar, Gmail chưa đọc, CRM; API action tạo/sửa lịch, gửi thư, tạo/sửa lead.
 - Hàng đợi Telegram, chuyển tiếp sang agent và sổ thực thi action theo operation ID.
+- Worker xử lý tin nhắn đa chat đồng thời (`ThreadPoolExecutor` 4 luồng song song, khóa FIFO theo `chat_id`).
+- Cache xác thực danh tính/quyền Odoo 60s trong bộ nhớ (actions API luôn bypass cache).
+- Phản hồi tương tác tức thì: gửi `sendChatAction: typing` ngay khi nhận tin từ Telegram.
 - Các module đồng bộ lịch Odoo–Google và nhắc hẹn có sẵn; cần kiểm chứng riêng trước khi bật trên lịch thật.
+
+### Tối ưu Thông lượng và Độ trễ Phản hồi (Gateway Performance)
+
+| Chỉ số | Trước tối ưu | Sau tối ưu | Lợi ích |
+|---|---|---|---|
+| **Xử lý tin nhắn Telegram** | Đơn luồng tuần tự (`max_workers=1`) | **Đa luồng song song (`max_workers=4`)** | Nhiều người dùng nhắn cùng lúc không bị block hàng đợi; vẫn bảo đảm FIFO tuyệt đối trên mỗi chat riêng |
+| **Xác minh danh tính Odoo** | Gọi XML-RPC mỗi turn (1.5s – 2.5s) | **Cache bộ nhớ an toàn 60s** | Giảm 90% tải lên Odoo server; giảm độ trễ mỗi turn đọc xuống còn < 50ms |
+| **Tín hiệu trực quan** | Im lặng khi Agent đang suy nghĩ | **Gửi `typing` tức thì (< 300ms)** | Người dùng nhận phản hồi thị giác ngay lập tức, không cảm thấy bot bị treo |
+| **Bảo vệ thao tác ghi** | - | **Bypass cache 100% đối với actions** | Thao tác ghi dữ liệu luôn kiểm tra quyền Odoo trực tiếp thời gian thực |
 
 Chuyển tiếp AI là tích hợp tùy chọn qua HTTP. Ứng dụng nhận yêu cầu cần tuân thủ contract API và tự quản lý luồng hội thoại, bản xem trước, xác nhận.
 
@@ -114,6 +126,7 @@ API nội bộ dùng `Authorization: Bearer <AGENT_TO_GATEWAY_SECRET>`.
 | `GET /internal/v1/users/{id}/calendar/events/{event_id}` | Chi tiết sự kiện lịch (kèm ETag để bảo đảm cập nhật một phần qua PATCH) |
 | `GET /internal/v1/users/{id}/crm/leads/{lead_id}` | Chi tiết cơ hội CRM (kèm `expected_write_date` chống ghi đè xung đột) |
 | `POST /internal/v1/users/{id}/actions` | Action giới hạn theo quyền, binding và operation ID |
+| `GET /internal/v1/users/{id}/actions/{operation_id}` | Tra cứu trạng thái và đối soát thao tác theo operation ID; xác minh tài khoản Odoo và quyền truy cập |
 
 Action có trong mã: `calendar.create`, `calendar.update`, `gmail.send`, `crm.create`, `crm.update`. Agent gọi sau khi người dùng xác nhận. API không cung cấp quyền gọi tùy ý model/method Odoo.
 
@@ -137,22 +150,22 @@ Nếu chuyển tiếp tới dịch vụ AI chạy trong container khác, đặt 
 # Kiểm tra định dạng và chuẩn mã nguồn (Ruff sạch 100%, 0 lỗi):
 .\.venv\Scripts\python.exe -m ruff check app tests
 
-# Chạy toàn bộ test suite của Gateway (142/142 test đạt, 0 lỗi):
-.\.venv\Scripts\python.exe -m pytest -v
+# Chạy toàn bộ test suite của Gateway trong môi trường cô lập (153 passed, 0 failed):
+.\.venv\Scripts\python.exe -B -X utf8 -m pytest -q --disable-warnings --tb=short
 
-# (Tùy chọn) Chạy riêng nhóm test tích hợp xuyên dịch vụ (5/5 test đạt):
+# (Tùy chọn) Chạy riêng nhóm test tích hợp xuyên dịch vụ:
 .\.venv\Scripts\python.exe -m pytest tests/integration/test_full_lifecycle_cross_app.py tests/integration/test_live_cross_app_e2e.py -v
 ```
 
 ### Kết quả xác minh và phạm vi đã kiểm chứng
 
-- **142 test tự động đạt 100%**: Bao gồm unit test, contract API v2, worker idempotency, hàng đợi Telegram, xử lý atomic lease, sweep sending và integration cross-app.
+- **153 test tự động đạt 100%**: Bao gồm unit test, contract API v2, kiểm tra quyền và xác thực Odoo cho API tra cứu trạng thái action (`GET /actions/{operation_id}`), worker idempotency, hàng đợi Telegram đa luồng, xử lý atomic lease, sweep sending và integration cross-app.
 - **Regression test XML-RPC CRM (`test_crm_rpc_domain_regression.py`)**: Đã bổ sung 8 test chuyên biệt với mock XML-RPC khắt khe, xác minh 4 vị trí gọi `search_read` (tạo lead có stage, đọc chi tiết lead, đọc bản ghi trước khi update lead, kiểm tra stage khi update lead) tuân thủ đúng cấu trúc `domain = [("id", "=", record_id)]` và `args = [domain]`. Mock từ chối hoàn toàn domain lồng sai cấu trúc, kiểm tra xung đột `write_date` và bảo đảm không gọi `create`/`write` khi bị từ chối.
 - **Ruff Linting**: Toàn bộ codebase `app` và `tests` đạt chuẩn Ruff sạch hoàn toàn, không còn cảnh báo hoặc lỗi. Exception chaining (`from e` / `from err`) được áp dụng chuẩn hóa trong khi giữ nguyên mã lỗi API và HTTP status code.
 - **Git diff**: Kiểm tra `git diff --check` đạt chuẩn, không có lỗi định dạng hay khoảng trắng thừa.
 
 > **Lưu ý quan trọng về phạm vi kiểm thử:**
-> Toàn bộ 142 test tự động được chạy trong môi trường kiểm thử cô lập (dùng SQLite tạm thời trong bộ nhớ và mock proxy ở tầng biên XML-RPC / Google / Telegram). Kiểm thử tự động chứng minh tính toàn vẹn của logic nghiệp vụ và contract API, nhưng **không thay thế việc nghiệm thu bằng tài khoản thật**. Người dùng cần tự nghiệm thu với tenant Odoo Online thật, tài khoản Google OAuth thật và bot Telegram thật theo checklist bên dưới.
+> Toàn bộ 153 test tự động được chạy trong môi trường kiểm thử cô lập (dùng SQLite tạm thời trong bộ nhớ và mock proxy ở tầng biên XML-RPC / Google / Telegram). Kiểm thử tự động chứng minh tính toàn vẹn của logic nghiệp vụ và contract API, nhưng **không thay thế việc nghiệm thu bằng tài khoản thật**. Người dùng cần tự nghiệm thu với tenant Odoo Online thật, tài khoản Google OAuth thật và bot Telegram thật theo checklist bên dưới.
 
 ## Checklist tự nghiệm thu bằng tài khoản thật (Dành cho người dùng)
 

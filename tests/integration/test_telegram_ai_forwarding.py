@@ -111,7 +111,10 @@ def test_telegram_ai_forwarding_success(temp_db_path, fernet_key):
             return ai_response_data
 
     with patch("httpx.post", return_value=MockResponse()) as mock_http:
-        with patch("app.telegram.client.TelegramClient.send_message") as mock_send:
+        with (
+            patch("app.telegram.client.TelegramClient.send_message") as mock_send,
+            patch("app.telegram.client.TelegramClient.send_chat_action"),
+        ):
             resp = client.post(
                 "/webhooks/telegram",
                 json=payload,

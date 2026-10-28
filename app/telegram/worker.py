@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import logging
 import secrets
@@ -32,6 +33,11 @@ class TelegramAIWorker:
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="TgChatWorker"
+        )
+        self._active_chat_ids: set[int] = set()
+        self._chat_lock = threading.Lock()
 
     def recover_on_startup(self) -> None:
         """On gateway startup, recover any unfinished updates:
@@ -79,20 +85,31 @@ class TelegramAIWorker:
             db.commit()
         self._sweep_expired_sending()
 
+    def _extract_chat_id(self, payload_str: str | None, default_id: int) -> int:
+        if not payload_str:
+            return default_id
+        try:
+            data = json.loads(payload_str)
+            msg = data.get("message") or data.get("edited_message") or {}
+            chat = msg.get("chat", {})
+            return chat.get("id") or default_id
+        except Exception:
+            return default_id
+
     def process_pending_once(self) -> int:
         """Process one batch of pending, retryable, or deliverable updates.
+        Supports up to 4 concurrent chats with strict FIFO per chat.
         Returns the number of updates processed.
         """
         # Sweep expired sending records first
         self._sweep_expired_sending()
 
         now = datetime.now(UTC)
-        processed_count = 0
 
         with self.session_factory() as db:
-            # Find eligible candidate IDs
+            # Find eligible candidate IDs and payloads
             candidates = (
-                db.query(TelegramUpdate.id)
+                db.query(TelegramUpdate.id, TelegramUpdate.payload)
                 .filter(
                     (TelegramUpdate.status == "pending")
                     | ((TelegramUpdate.status == "retry_wait") & (TelegramUpdate.retry_at <= now))
@@ -110,15 +127,56 @@ class TelegramAIWorker:
                     )
                 )
                 .order_by(TelegramUpdate.id.asc())
-                .limit(10)
+                .limit(20)
                 .all()
             )
 
-            candidate_ids = [c[0] for c in candidates]
+        if not candidates:
+            return 0
 
-        for up_id in candidate_ids:
-            if self._process_single_update(up_id):
-                processed_count += 1
+        # Select up to 4 candidates with distinct chat_ids not currently active
+        selected_tasks: list[tuple[int, int]] = []
+        with self._chat_lock:
+            for up_id, payload_str in candidates:
+                if len(selected_tasks) >= 4:
+                    break
+                chat_id = self._extract_chat_id(payload_str, default_id=up_id)
+                if chat_id not in self._active_chat_ids and not any(c == chat_id for _, c in selected_tasks):
+                    selected_tasks.append((up_id, chat_id))
+                    self._active_chat_ids.add(chat_id)
+
+        if not selected_tasks:
+            return 0
+
+        if len(selected_tasks) == 1:
+            u_id, c_id = selected_tasks[0]
+            try:
+                return 1 if self._process_single_update(u_id) else 0
+            finally:
+                with self._chat_lock:
+                    self._active_chat_ids.discard(c_id)
+
+        # Execute concurrent tasks across separate chats
+        def _run_with_lock(u_id: int, c_id: int) -> bool:
+            try:
+                return self._process_single_update(u_id)
+            finally:
+                with self._chat_lock:
+                    self._active_chat_ids.discard(c_id)
+
+        futures = [
+            self._executor.submit(_run_with_lock, u_id, c_id)
+            for u_id, c_id in selected_tasks
+        ]
+        done, _ = concurrent.futures.wait(futures, timeout=30.0)
+
+        processed_count = 0
+        for f in done:
+            try:
+                if f.result():
+                    processed_count += 1
+            except Exception as e:
+                _logger.error("Exception in chat worker task: %s", e)
 
         return processed_count
 
@@ -593,12 +651,21 @@ class TelegramAIWorker:
             "received_at": datetime.now(UTC).isoformat(),
         }
 
+        # Send typing action to Telegram
+        try:
+            self.telegram_client.send_chat_action(chat_id, "typing")
+        except Exception as e:
+            _logger.debug("Failed to send typing chat action: %s", e)
+
+        t_ai_start = time.time()
         try:
             headers = {
                 "Authorization": f"Bearer {self.settings.GATEWAY_TO_AGENT_SECRET}",
                 "Content-Type": "application/json",
             }
             resp = httpx.post(ai_url, json=req_payload, headers=headers, timeout=25.0)
+            t_ai = time.time() - t_ai_start
+            _logger.info("TIMING_AI: request_id=%s duration=%.3fs status=%s", request_id, t_ai, resp.status_code)
 
             if resp.status_code == 200:
                 resp_data = resp.json()
@@ -874,11 +941,15 @@ class TelegramAIWorker:
         def _worker_loop():
             _logger.info("TelegramAIWorker started.")
             while not self._stop_event.is_set():
+                processed = 0
                 try:
-                    self.process_pending_once()
+                    processed = self.process_pending_once()
                 except Exception as e:
                     _logger.error("Error in TelegramAIWorker loop: %s", e)
-                time.sleep(1.0)
+                if processed > 0:
+                    self._stop_event.wait(0.02)
+                else:
+                    self._stop_event.wait(0.2)
             _logger.info("TelegramAIWorker stopped.")
 
         self._thread = threading.Thread(target=_worker_loop, daemon=True, name="TelegramAIWorker")
@@ -888,3 +959,4 @@ class TelegramAIWorker:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
+        self._executor.shutdown(wait=False, cancel_futures=True)

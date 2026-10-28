@@ -36,14 +36,15 @@ class MockTelegramHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {"raw": body}
 
-        MockTelegramHandler.received_messages.append(payload)
+        if "text" in payload:
+            MockTelegramHandler.received_messages.append(payload)
 
-        # Trigger hook if set (e.g. revoke user permissions after chunk 1)
-        if MockTelegramHandler.on_send_hook:
-            try:
-                MockTelegramHandler.on_send_hook(payload)
-            except Exception as e:
-                _logger.error("Error in on_send_hook: %s", e)
+            # Trigger hook if set (e.g. revoke user permissions after chunk 1)
+            if MockTelegramHandler.on_send_hook:
+                try:
+                    MockTelegramHandler.on_send_hook(payload)
+                except Exception as e:
+                    _logger.error("Error in on_send_hook: %s", e)
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

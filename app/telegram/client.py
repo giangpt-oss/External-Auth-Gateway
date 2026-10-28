@@ -74,3 +74,21 @@ class TelegramClient:
             return data.get("result", {})
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise TelegramDeliveryUnknownError(f"Network error connecting to Telegram: {e}") from e
+
+    def send_chat_action(
+        self,
+        chat_id: int | str,
+        action: str = "typing",
+    ) -> bool:
+        if not self.bot_token:
+            return False
+        url = self._get_url("sendChatAction")
+        payload = {"chat_id": chat_id, "action": action}
+        try:
+            resp = httpx.post(url, json=payload, timeout=5.0)
+            data = resp.json()
+            return bool(data.get("ok"))
+        except Exception as e:
+            _logger.debug("Failed to sendChatAction %s to chat %s: %s", action, chat_id, e)
+            return False
+

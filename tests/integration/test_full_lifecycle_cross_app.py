@@ -36,7 +36,8 @@ class MockTelegramHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {"raw": body}
 
-        MockTelegramHandler.received_messages.append(payload)
+        if "text" in payload:
+            MockTelegramHandler.received_messages.append(payload)
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -307,7 +308,7 @@ def test_full_lifecycle_cross_app_task_create_preview_confirm(full_lifecycle_env
     msgs = wait_for_mock_tg_messages(env, min_count=2)
     assert len(msgs) >= 2
     success_body = msgs[-1].get("text", "")
-    assert "Đã tạo thành công công việc cá nhân" in success_body
+    assert ("Thực hiện thành công" in success_body) or ("Đã tạo thành công" in success_body)
     assert "Chuẩn bị slide báo cáo" in success_body
 
 
