@@ -330,3 +330,53 @@ class OdooService:
                 args=[[lead_id], vals],
             )
         return {"id": lead_id, "updated": True}
+
+    def execute_catalog_query(
+        self,
+        uid: int,
+        secret: str,
+        model: str,
+        fields: list[str] | None = None,
+        domain: list[Any] | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        order: str | None = None,
+    ) -> dict[str, Any]:
+        """Thực hiện truy vấn đọc an toàn qua Whitelist Catalog bằng credential của chính người dùng.
+
+        Trả về dict: {"items": [...], "count": len(items), "limit": limit, "offset": offset, "model": model}
+        """
+        from app.odoo.catalog import validate_catalog_query
+
+        val_model, val_fields, val_domain, val_limit, val_offset, val_order = validate_catalog_query(
+            model=model,
+            fields=fields,
+            domain=domain,
+            limit=limit,
+            offset=offset,
+            order=order,
+        )
+
+        records = self.client.execute(
+            uid=uid,
+            secret=secret,
+            model=val_model,
+            method="search_read",
+            args=[val_domain],
+            kwargs={
+                "fields": val_fields,
+                "limit": val_limit,
+                "offset": val_offset,
+                "order": val_order,
+            },
+        )
+
+        items = records if isinstance(records, list) else []
+        return {
+            "items": items,
+            "count": len(items),
+            "limit": val_limit,
+            "offset": val_offset,
+            "model": val_model,
+        }
+

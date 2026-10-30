@@ -82,11 +82,13 @@ def send_test_message(
             .first()
         )
         if not conn:
-            is_html = "text/html" in request.headers.get("Accept", "") or "form" in request.headers.get(
-                "Content-Type", ""
-            )
+            is_html = "text/html" in request.headers.get(
+                "Accept", ""
+            ) or "form" in request.headers.get("Content-Type", "")
             if is_html:
-                return RedirectResponse(url="/?error=telegram_not_connected", status_code=status.HTTP_303_SEE_OTHER)
+                return RedirectResponse(
+                    url="/?error=telegram_not_connected", status_code=status.HTTP_303_SEE_OTHER
+                )
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={

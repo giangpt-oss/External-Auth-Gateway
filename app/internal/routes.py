@@ -13,6 +13,7 @@ from app.google.oauth import GoogleOAuthService
 from app.internal.cache import identity_cache
 from app.internal.security import verify_agent_secret
 from app.models import ActionOperation, TelegramConnection, User
+from app.odoo.catalog import get_catalog_overview
 from app.odoo.client import (
     OdooAccessError,
     OdooAccountInactiveError,
@@ -1069,3 +1070,83 @@ def get_crm_lead_detail(
                 detail={"code": "LEAD_NOT_FOUND", "message": f"Không tìm thấy cơ hội CRM {lead_id}"},
             )
         return {"status": "OK", "lead": lead}
+
+
+class OdooQueryRequest(BaseModel):
+    model: str
+    fields: list[str] | None = None
+    domain: list[Any] | None = None
+    limit: int | None = 10
+    offset: int | None = 0
+    order: str | None = None
+
+
+@router.get("/odoo/catalog")
+def get_odoo_catalog():
+    """Trả về danh mục models và fields Odoo an toàn được hỗ trợ."""
+    return {"status": "OK", "catalog": get_catalog_overview()}
+
+
+@router.post("/users/{user_id}/odoo/query")
+def query_odoo_records(
+    user_id: int,
+    req: OdooQueryRequest,
+    request: Request,
+):
+    """Truy vấn dữ liệu Odoo an toàn theo Whitelist Catalog dưới quyền của chính user."""
+    settings = request.app.state.settings
+    session_factory = request.app.state.session_factory
+    with session_factory() as db:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user or not user.active:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "USER_NOT_FOUND", "message": "User not found or inactive"},
+            )
+
+        secret = ""
+        if user.credential and user.credential.encrypted_secret and settings.ENCRYPTION_KEY:
+            try:
+                secret = decrypt_secret(user.credential.encrypted_secret, settings.ENCRYPTION_KEY)
+            except Exception:
+                secret = ""
+
+        odoo_svc = _get_odoo_service(request, user)
+        _verify_odoo_account(odoo_svc, user.odoo_uid, secret)
+
+        try:
+            res = odoo_svc.execute_catalog_query(
+                uid=user.odoo_uid,
+                secret=secret,
+                model=req.model,
+                fields=req.fields,
+                domain=req.domain,
+                limit=req.limit,
+                offset=req.offset,
+                order=req.order,
+            )
+            return {
+                "status": "OK",
+                **res,
+            }
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_QUERY", "message": str(e)},
+            ) from e
+        except OdooAccessError as e:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "PERMISSION_DENIED", "message": f"Tài khoản Odoo không có quyền truy cập {req.model}: {e}"},
+            ) from e
+        except OdooNetworkError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": "ODOO_UNAVAILABLE", "message": f"Không thể kết nối Odoo: {e}"},
+            ) from e
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "SERVICE_ERROR", "message": str(e)},
+            ) from e
+
