@@ -132,7 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     with httpx.Client(timeout=30.0) as client:
                         while not poller_stop_event.is_set():
                             try:
-                                params = {"timeout": 20}
+                                params = {"timeout": 20, "allowed_updates": '["message","edited_message","callback_query"]'}
                                 if offset is not None:
                                     params["offset"] = offset
                                 resp = client.get(api_url, params=params)

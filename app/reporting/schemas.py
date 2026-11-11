@@ -13,7 +13,7 @@ class TelegramScope(BaseModel):
 
 class ReportRequest(TelegramScope):
     model_config = ConfigDict(extra='forbid')
-    report_type: Literal["revenue", "sales", "commercial_summary", "inventory", "tasks", "quotations", "purchases", "purchase_rfqs", "crm", "contacts", "transfers"]
+    report_type: Literal["revenue", "sales", "commercial_summary", "inventory", "tasks", "quotations", "purchases", "purchase_rfqs", "crm", "contacts", "transfers", "employee_weekly"]
     date_from: date | None = None
     date_to: date | None = None
     company_ids: list[int] = Field(default_factory=list, max_length=30)
@@ -21,6 +21,8 @@ class ReportRequest(TelegramScope):
     warehouse_id: int | None = Field(default=None, gt=0)
     project_id: int | None = Field(default=None, gt=0)
     assignee_id: int | None = Field(default=None, gt=0)
+    employee_id: int | None = Field(default=None, gt=0)
+    employee_name: str | None = None
     product_id: int | None = Field(default=None, gt=0)
     stage_id: int | None = Field(default=None, gt=0)
     record_scope: Literal["visible", "mine"] = "visible"
@@ -42,11 +44,16 @@ class ReportRequest(TelegramScope):
             raise ValueError("Múi giờ báo cáo không hợp lệ.") from exc
         if self.record_scope == "mine" and self.assignee_id:
             raise ValueError("Chọn phạm vi của tôi hoặc người phụ trách cụ thể, không dùng đồng thời.")
+        if self.report_type == "employee_weekly" and (not self.date_from or not self.date_to):
+            from datetime import timedelta
+            t = date.today()
+            self.date_to = t
+            self.date_from = t - timedelta(days=7)
         if self.record_scope == "mine" and self.report_type in ("inventory", "revenue", "commercial_summary", "tasks"):
             raise ValueError("Phạm vi của tôi chưa được định nghĩa cho loại báo cáo này.")
         if bool(self.date_from) != bool(self.date_to):
             raise ValueError("Cần cung cấp cả ngày bắt đầu và ngày kết thúc.")
-        if self.report_type not in ("inventory", "crm", "contacts"):
+        if self.report_type not in ("inventory", "crm", "contacts", "employee_weekly"):
             if not self.date_from or not self.date_to:
                 raise ValueError("Cần ngày bắt đầu và ngày kết thúc báo cáo.")
             if self.date_from > self.date_to:
@@ -61,7 +68,7 @@ class ReportRequest(TelegramScope):
             raise ValueError("Bộ lọc dự án chỉ dùng cho báo cáo công việc.")
         if self.partner_id and self.report_type not in ("revenue", "sales", "commercial_summary", "quotations", "purchases", "purchase_rfqs", "crm", "contacts", "transfers"):
             raise ValueError("Bộ lọc đối tác không phù hợp với loại báo cáo này.")
-        if self.assignee_id and self.report_type not in ("sales", "tasks", "quotations", "purchases", "purchase_rfqs", "crm", "contacts", "transfers"):
+        if self.assignee_id and self.report_type not in ("sales", "tasks", "quotations", "purchases", "purchase_rfqs", "crm", "contacts", "transfers", "employee_weekly"):
             raise ValueError("Bộ lọc người phụ trách không phù hợp với loại báo cáo này.")
         if self.product_id and self.report_type not in ("inventory", "transfers"):
             raise ValueError("Bộ lọc sản phẩm chỉ dùng cho tồn kho hoặc phiếu kho.")

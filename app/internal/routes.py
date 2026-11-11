@@ -1007,7 +1007,7 @@ def get_user_action_status(
 
         # Trích xuất result nếu có
         res_data = None
-        if op.status == "completed" and op.result_json:
+        if (op.status == "completed" or (op.status == "failed" and op.action == "sales.quotation.create")) and op.result_json:
             # Nếu là operation cũ không có telegram_binding_id -> không tự động trả nội dung kết quả
             if not op.telegram_binding_id:
                 res_data = None

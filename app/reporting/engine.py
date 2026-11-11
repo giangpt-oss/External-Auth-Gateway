@@ -1,6 +1,6 @@
 """Deterministic calculations over complete Odoo record sets."""
 from collections import defaultdict
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -27,7 +27,8 @@ MODELS.update({
 LABELS = {"revenue": "Doanh thu theo hóa đơn", "sales": "Doanh số theo đơn bán", "inventory": "Tồn kho hiện tại", "tasks": "Công việc Odoo Project"}
 LABELS.update({"quotations": "Báo giá bán hàng", "purchases": "Đơn mua đã xác nhận",
                "purchase_rfqs": "Yêu cầu báo giá mua hàng", "crm": "Cơ hội và khách hàng tiềm năng CRM",
-               "contacts": "Liên hệ", "transfers": "Phiếu kho đã hoàn tất"})
+               "contacts": "Liên hệ", "transfers": "Phiếu kho đã hoàn tất",
+               "employee_weekly": "Báo cáo công việc tuần của nhân viên"})
 
 
 
@@ -45,9 +46,11 @@ def decimal(value):
 
 def capability(ctx, report_types=None):
     requested = set(report_types or MODELS)
-    kinds = requested - {"commercial_summary"}
+    kinds = requested - {"commercial_summary", "employee_weekly"}
     if "commercial_summary" in requested:
         kinds |= {"revenue", "sales"}
+    if "employee_weekly" in requested:
+        kinds |= {"tasks"}
     result = {}
     for kind in sorted(kinds):
         if kind not in MODELS:
@@ -69,6 +72,8 @@ def capability(ctx, report_types=None):
             result[kind] = {"available": False, "model": model, "reason": type(exc).__name__}
     if report_types is None or "commercial_summary" in requested:
         result["commercial_summary"] = {"available": all(result[k]["available"] for k in ("revenue", "sales"))}
+    if report_types is None or "employee_weekly" in requested:
+        result["employee_weekly"] = {"available": result.get("tasks", {}).get("available", True)}
     return result
 
 
@@ -109,10 +114,209 @@ def period_domain(req, field, field_type):
     return [(field, ">=", start), (field, "<", end)]
 
 
+def generate_employee_weekly(ctx, req: ReportRequest, checkpoint, started, companies, warnings):
+    target_uid = None
+    emp_profile = {}
+    has_employee = False
+    emp_fields = {}
+    try:
+        emp_fields = ctx.read_fields("hr.employee")
+        has_employee = "name" in emp_fields
+    except Exception:
+        has_employee = False
+
+    if has_employee:
+        emp_domain = []
+        if req.employee_id:
+            emp_domain = [("id", "=", req.employee_id)]
+        elif req.assignee_id:
+            emp_domain = [("user_id", "=", req.assignee_id)]
+        elif req.employee_name:
+            emp_domain = [("name", "ilike", req.employee_name.strip())]
+        else:
+            emp_domain = [("user_id", "=", ctx.user.odoo_uid)]
+
+        req_fields = [f for f in ["id", "name", "job_title", "department_id", "work_email", "work_phone", "parent_id", "user_id"] if f in emp_fields]
+        emp_rows = ctx.call("hr.employee", "search_read", [emp_domain], {"fields": req_fields, "limit": 1})
+        if emp_rows:
+            emp = emp_rows[0]
+            target_uid = identity(emp.get("user_id")) or ctx.user.odoo_uid
+            emp_profile = {
+                "id": emp.get("id"),
+                "name": emp.get("name") or "Chưa rõ",
+                "job_title": label(emp.get("job_title")),
+                "department": label(emp.get("department_id")),
+                "manager": label(emp.get("parent_id")),
+                "email": emp.get("work_email") or "Chưa có email",
+                "phone": emp.get("work_phone") or "Chưa có SĐT",
+                "user_id": target_uid,
+            }
+
+    if not target_uid:
+        target_uid = req.assignee_id or ctx.user.odoo_uid
+        emp_profile = {
+            "id": None,
+            "name": req.employee_name or ctx.user.name or ctx.user.login,
+            "job_title": "Nhân viên",
+            "department": "Chưa phân bổ",
+            "manager": "Chưa xác định",
+            "email": ctx.user.login,
+            "phone": "Chưa có SĐT",
+            "user_id": target_uid,
+        }
+
+    date_from_str = req.date_from.strftime("%Y-%m-%d 00:00:00") if req.date_from else None
+    date_to_str = req.date_to.strftime("%Y-%m-%d 23:59:59") if req.date_to else None
+    sections = []
+
+    sections.append({
+        "type": "employee_profile",
+        "title": "Thông tin nhân sự",
+        "model": "hr.employee",
+        "count": 1,
+        "summary": [emp_profile],
+        "rows": [emp_profile],
+    })
+
+    try:
+        task_fields = ctx.read_fields("project.task")
+        assignee_f = "user_ids" if "user_ids" in task_fields else ("user_id" if "user_id" in task_fields else None)
+        if assignee_f:
+            t_domain = [(assignee_f, "in", [target_uid])]
+            if companies:
+                t_domain.append(("company_id", "in", companies))
+            req_t_fields = [f for f in ["id", "name", "project_id", "stage_id", "state", "is_closed", "date_deadline", "create_date", "write_date"] if f in task_fields]
+            task_rows = fetch_all(ctx, "project.task", req_t_fields, t_domain, checkpoint)
+
+            today_iso = date.today().isoformat()
+            done_tasks = []
+            overdue_tasks = []
+            inprogress_tasks = []
+            for t in task_rows:
+                is_done = bool(t.get("is_closed")) or t.get("state") in ("1_done", "done")
+                deadline = str(t.get("date_deadline") or "")[:10]
+                if is_done:
+                    done_tasks.append(t)
+                elif deadline and deadline < today_iso:
+                    overdue_tasks.append(t)
+                else:
+                    inprogress_tasks.append(t)
+
+            task_summary_data = {
+                "total_tasks": len(task_rows),
+                "done_count": len(done_tasks),
+                "overdue_count": len(overdue_tasks),
+                "inprogress_count": len(inprogress_tasks),
+                "done_rate": f"{round(len(done_tasks) / len(task_rows) * 100, 1)}%" if task_rows else "0%",
+            }
+            sections.append({
+                "type": "tasks",
+                "title": "Công việc & Dự án",
+                "model": "project.task",
+                "count": len(task_rows),
+                "summary": [task_summary_data],
+                "rows": task_rows,
+            })
+    except Exception as exc:
+        warnings.append(f"Không thể đọc công việc Project: {exc}")
+
+    try:
+        act_fields = ctx.read_fields("mail.activity")
+        if "user_id" in act_fields:
+            act_domain = [("user_id", "=", target_uid)]
+            req_act_f = [f for f in ["id", "res_model", "res_name", "activity_type_id", "summary", "date_deadline", "state", "create_date"] if f in act_fields]
+            act_rows = ctx.call("mail.activity", "search_read", [act_domain], {"fields": req_act_f, "limit": 100, "order": "date_deadline asc"})
+            act_summary = {"total_activities": len(act_rows), "types": {}}
+            for a in act_rows:
+                t_name = label(a.get("activity_type_id"))
+                act_summary["types"][t_name] = act_summary["types"].get(t_name, 0) + 1
+            sections.append({
+                "type": "activities",
+                "title": "Hoạt động & Lịch làm việc",
+                "model": "mail.activity",
+                "count": len(act_rows),
+                "summary": [act_summary],
+                "rows": act_rows,
+            })
+    except Exception:
+        pass
+
+    try:
+        sale_fields = ctx.read_fields("sale.order")
+        if "user_id" in sale_fields and "amount_total" in sale_fields:
+            s_domain = [("user_id", "=", target_uid)]
+            if date_from_str and date_to_str:
+                s_domain += [("date_order", ">=", date_from_str), ("date_order", "<=", date_to_str)]
+            if companies:
+                s_domain.append(("company_id", "in", companies))
+            req_s_f = [f for f in ["id", "name", "partner_id", "date_order", "state", "amount_total", "currency_id"] if f in sale_fields]
+            sale_rows = fetch_all(ctx, "sale.order", req_s_f, s_domain, checkpoint)
+
+            quotes = [s for s in sale_rows if s.get("state") in ("draft", "sent")]
+            confirmed = [s for s in sale_rows if s.get("state") in ("sale", "done")]
+            total_rev = sum(decimal(s.get("amount_total")) for s in confirmed)
+            quote_val = sum(decimal(s.get("amount_total")) for s in quotes)
+
+            sale_summary = {
+                "total_orders": len(sale_rows),
+                "quotes_count": len(quotes),
+                "quotes_value": str(quote_val),
+                "confirmed_count": len(confirmed),
+                "confirmed_value": str(total_rev),
+            }
+            sections.append({
+                "type": "sales",
+                "title": "Đơn hàng & Báo giá",
+                "model": "sale.order",
+                "count": len(sale_rows),
+                "summary": [sale_summary],
+                "rows": sale_rows,
+            })
+    except Exception:
+        pass
+
+    try:
+        crm_fields = ctx.read_fields("crm.lead")
+        if "user_id" in crm_fields:
+            c_domain = [("user_id", "=", target_uid)]
+            if date_from_str and date_to_str:
+                c_domain += [("create_date", ">=", date_from_str), ("create_date", "<=", date_to_str)]
+            if companies:
+                c_domain.append(("company_id", "in", companies))
+            req_c_f = [f for f in ["id", "name", "partner_id", "stage_id", "expected_revenue", "probability"] if f in crm_fields]
+            crm_rows = fetch_all(ctx, "crm.lead", req_c_f, c_domain, checkpoint)
+            crm_summary = {
+                "total_leads": len(crm_rows),
+                "expected_revenue": str(sum(decimal(c.get("expected_revenue")) for c in crm_rows)),
+            }
+            sections.append({
+                "type": "crm",
+                "title": "Cơ hội khách hàng CRM",
+                "model": "crm.lead",
+                "count": len(crm_rows),
+                "summary": [crm_summary],
+                "rows": crm_rows,
+            })
+    except Exception:
+        pass
+
+    return {
+        "report_type": "employee_weekly",
+        "parameters": req.model_dump(mode="json", exclude={"telegram_user_id", "chat_id", "telegram_binding_id"}),
+        "company_ids": companies,
+        "started_at": started.isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "warnings": list(dict.fromkeys(warnings)),
+        "sections": sections,
+    }
+
+
 def generate(ctx, req: ReportRequest, checkpoint):
     started = datetime.now(UTC)
     companies = ctx.selected_companies(req.company_ids)
     sections, warnings = [], ["Dữ liệu là trạng thái khi truy vấn, không phải snapshot giao dịch."]
+    if req.report_type == "employee_weekly":
+        return generate_employee_weekly(ctx, req, checkpoint, started, companies, warnings)
     kinds = ["revenue", "sales"] if req.report_type == "commercial_summary" else [req.report_type]
     for kind in kinds:
         if kind in NEW_PROFILES:

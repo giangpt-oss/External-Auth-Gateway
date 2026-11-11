@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import Field
 
 from app.internal.security import verify_agent_secret
-from app.odoo.client import OdooAccessError, OdooError, OdooNetworkError
-from app.quotations.approval import QuotationApproval
+from app.odoo.client import OdooAccessError, OdooNetworkError
+from app.quotations.approval import read_approval_status
 from app.quotations.service import QuotationService, QuotationValidationError
 from app.reporting.context import authenticated_context
 from app.reporting.schemas import TelegramScope
@@ -57,26 +57,7 @@ def quotation_status(user_id: int, request: Request, name: str = Query(..., min_
             response = QuotationService(ctx.service.client, ctx.user.odoo_uid, ctx.secret).status_by_name(name, company_id)
             result = response.get('result')
             if result and getattr(request.app.state.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False):
-                try:
-                    company = result['company_id'][0]
-                    adapter = QuotationApproval(ctx.service.client, ctx.user.odoo_uid, ctx.secret, company)
-                    state = adapter.inspect(result['id'])
-                    if state['status'] in ('approved', 'pending'):
-                        from app.business.quotation_approval import require_review
-                        from app.business.service import BusinessService, Conflict
-                        business = BusinessService(ctx)
-                        business.company_id = company
-                        try:
-                            require_review(business, result)
-                        except Conflict:
-                            state['status'] = 'review_required'
-                            state['message'] = 'Nội dung chưa có phiên bản xin duyệt hợp lệ trong agent; chưa được gửi.'
-                    ids = sorted({uid for rule in state['rules'] for uid in rule.get('approver_ids', [])})
-                    people = adapter.call('res.users', 'search_read', [[('id', 'in', ids)]], fields=['name']) if ids else []
-                    result['approval'] = {'status': state['status'], 'approvers': [p['name'] for p in people],
-                                          'scope': 'agent_send_gate', 'message': state['message']}
-                except OdooError:
-                    result['approval'] = {'status': 'unknown', 'message': 'Chưa đọc được trạng thái duyệt nội bộ; không coi là đã duyệt.'}
+                result['approval'] = read_approval_status(ctx, result)
             return response
         except OdooAccessError as exc:
             raise HTTPException(403, 'Tài khoản không có quyền xem báo giá này.') from exc

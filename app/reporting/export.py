@@ -4,7 +4,7 @@ from decimal import Decimal
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
-from app.reporting.engine import LABELS
+from app.reporting.engine import LABELS, label
 
 HEADERS = {
     "id": "ID chứng từ", "name": "Chứng từ / Công việc", "partner_id": "Khách hàng",
@@ -43,7 +43,11 @@ HEADERS = {
     "related_company": "Tổ chức liên quan", "related_company_id": "ID tổ chức liên quan",
     "supplier_rank": "Hạng nhà cung cấp", "total_transfers": "Tổng phiếu hoàn tất",
     "date_closed": "Ngày đóng", "date_open": "Ngày phân công",
-
+    "job_title": "Chức danh", "department": "Phòng ban", "manager": "Quản lý trực tiếp",
+    "done_count": "Đã hoàn thành", "overdue_count": "Quá hạn", "inprogress_count": "Đang thực hiện",
+    "done_rate": "Tỷ lệ hoàn thành", "quotes_count": "Số báo giá", "quotes_value": "Giá trị báo giá",
+    "confirmed_count": "Số đơn hoàn tất", "confirmed_value": "Doanh số thực tế",
+    "res_name": "Tài liệu liên quan", "activity_type_id": "Loại hoạt động", "summary": "Tóm tắt / Nội dung",
 }
 NUMBERS = {"untaxed", "tax", "total", "quantity", "reserved", "available", "net_untaxed", "net_tax", "net_total", "expected_revenue", "probability"}
 DATES = {"invoice_date", "date_deadline", "date_order", "create_date", "write_date", "date_approve", "date_done", "scheduled_date", "validity_date", "date_closed", "date_open"}
@@ -215,12 +219,31 @@ def export_xlsx(result):
         "crm": ["Báo cáo", "Công ty", "Tiền tệ", "Số lead / cơ hội", "Giá trị kỳ vọng", "Đã thắng", "Lưu ý"],
         "contacts": ["Báo cáo", "Tổng liên hệ", "Doanh nghiệp", "Cá nhân", "Thiếu email", "Thiếu điện thoại", ""],
         "transfers": ["Báo cáo", "Nghiệp vụ", "Số phiếu", "Trạng thái", "", "", ""],
+        "employee_weekly": ["Hạng mục", "Thông tin / Nội dung", "Chỉ số / Số lượng", "Chi tiết", "", "", ""],
     }
     append_row(overview, headings.get(kind, ["Báo cáo", "Công ty", "Tiền tệ", "Số chứng từ", "Trước thuế", "Thuế", "Tổng tiền"]))
     header_row = overview.max_row
     for section in result["sections"]:
         totals = [s for s in section["summary"] if s.get("is_total") or s.get("is_crm_total")]
-        if section["type"] == "crm":
+        if kind == "employee_weekly":
+            if section["type"] == "employee_profile":
+                p = section["summary"][0] if section.get("summary") else {}
+                append_row(overview, [section["title"], f"{p.get('name')} - {p.get('job_title')}", p.get("department", ""), p.get("email", ""), "", "", ""])
+            elif section["type"] == "tasks":
+                t = section["summary"][0] if section.get("summary") else {}
+                append_row(overview, [section["title"], f"Tỷ lệ xong: {t.get('done_rate')}", f"Tổng: {t.get('total_tasks')}", f"Xong: {t.get('done_count')} | Quá hạn: {t.get('overdue_count')}", "", "", ""])
+            elif section["type"] == "activities":
+                a = section["summary"][0] if section.get("summary") else {}
+                append_row(overview, [section["title"], "Hoạt động & Lịch làm việc", a.get("total_activities", 0), "", "", "", ""])
+            elif section["type"] == "sales":
+                s = section["summary"][0] if section.get("summary") else {}
+                append_row(overview, [section["title"], f"Báo giá: {s.get('quotes_count')} | Đơn bán: {s.get('confirmed_count')}", s.get("total_orders", 0), f"Doanh số: {s.get('confirmed_value', 0)}", "", "", ""])
+            elif section["type"] == "crm":
+                c = section["summary"][0] if section.get("summary") else {}
+                append_row(overview, [section["title"], "Cơ hội khách hàng", c.get("total_leads", 0), f"Kỳ vọng: {c.get('expected_revenue', 0)}", "", "", ""])
+            else:
+                append_row(overview, [section["title"], "", section.get("count", 0), "", "", "", ""])
+        elif section["type"] == "crm":
             for item in totals:
                 append_row(overview, [section["title"], item["company"], item["currency"], item["count"],
                     float(Decimal(item["expected_revenue"])), item.get("won_count", 0), "Kỳ vọng, không phải doanh thu đã thực hiện"])
@@ -238,13 +261,20 @@ def export_xlsx(result):
                     float(Decimal(item["untaxed"])), float(Decimal(item["tax"])), float(Decimal(item["total"]))])
         else:
             append_row(overview, [section["title"], "", "", section["count"], "Không áp dụng", "Không áp dụng", "Không áp dụng"])
-        name = {"revenue": "Chi_tiet_hoa_don", "sales": "Chi_tiet_don_ban", "inventory": "Chi_tiet_ton_kho", "tasks": "Chi_tiet_cong_viec",
-                "quotations": "Chi_tiet_bao_gia", "purchases": "Chi_tiet_don_mua", "purchase_rfqs": "Chi_tiet_RFQ",
-                "crm": "Chi_tiet_CRM", "contacts": "Chi_tiet_lien_he", "transfers": "Chi_tiet_nhap_xuat"}[section["type"]]
+        name_map = {
+            "revenue": "Chi_tiet_hoa_don", "sales": "Chi_tiet_don_ban", "inventory": "Chi_tiet_ton_kho", "tasks": "Chi_tiet_cong_viec",
+            "quotations": "Chi_tiet_bao_gia", "purchases": "Chi_tiet_don_mua", "purchase_rfqs": "Chi_tiet_RFQ",
+            "crm": "Chi_tiet_CRM", "contacts": "Chi_tiet_lien_he", "transfers": "Chi_tiet_nhap_xuat",
+            "employee_profile": "Ho_so_nhan_vien", "activities": "Chi_tiet_hoat_dong",
+        }
+        name = name_map.get(section["type"], f"Chi_tiet_{section['type']}")
+        if name in workbook.sheetnames:
+            name = f"{name}_{section.get('type')}"
         table(workbook.create_sheet(name), details(section), params.get("timezone", "Asia/Bangkok"), section["type"])
-        groups = [s for s in section["summary"] if not s.get("is_total") and not s.get("is_crm_total")]
-        if groups:
-            table(workbook.create_sheet("TH_" + section["type"]), groups, params.get("timezone", "Asia/Bangkok"), section["type"])
+        if kind != "employee_weekly":
+            groups = [s for s in section["summary"] if not s.get("is_total") and not s.get("is_crm_total")]
+            if groups:
+                table(workbook.create_sheet("TH_" + section["type"]), groups, params.get("timezone", "Asia/Bangkok"), section["type"])
     overview.sheet_view.showGridLines = False
     overview.freeze_panes = f"D{header_row + 1}"
     for row in overview:
@@ -289,8 +319,96 @@ def export_xlsx(result):
     return stream.getvalue()
 
 
+def employee_weekly_chat_summary(result):
+    params = result["parameters"]
+    sections_by_type = {s["type"]: s for s in result["sections"]}
+    profile = (sections_by_type.get("employee_profile", {}).get("summary") or [{}])[0]
+    tasks_sec = sections_by_type.get("tasks", {})
+    task_stat = (tasks_sec.get("summary") or [{}])[0]
+    acts_sec = sections_by_type.get("activities", {})
+    act_stat = (acts_sec.get("summary") or [{}])[0]
+    sales_sec = sections_by_type.get("sales", {})
+    sale_stat = (sales_sec.get("summary") or [{}])[0]
+    crm_sec = sections_by_type.get("crm", {})
+    crm_stat = (crm_sec.get("summary") or [{}])[0]
+
+    lines = [
+        "📋 BÁO CÁO CÔNG VIỆC TUẦN CỦA NHÂN VIÊN",
+        f"👤 Nhân viên: {profile.get('name', 'Chưa rõ')} | Chức danh: {profile.get('job_title', 'Chưa rõ')}",
+        f"🏢 Phòng ban: {profile.get('department', 'Chưa rõ')} | Quản lý trực tiếp: {profile.get('manager', 'Chưa xác định')}",
+        f"📅 Kỳ báo cáo: {period_text(params)}",
+        "",
+        "📊 TỔNG HỢP CHỈ SỐ NHANH (KPIS):",
+        f"• Công việc dự án: {task_stat.get('done_count', 0)}/{task_stat.get('total_tasks', 0)} hoàn thành ({task_stat.get('done_rate', '0%')}) • Quá hạn: {task_stat.get('overdue_count', 0)} • Đang làm: {task_stat.get('inprogress_count', 0)}",
+    ]
+    if sale_stat.get("total_orders", 0) > 0:
+        lines.append(f"• Doanh số đơn bán: {Decimal(sale_stat.get('confirmed_value', 0)):,.2f} VNĐ ({sale_stat.get('confirmed_count', 0)} đơn chốt) • Báo giá nháp: {sale_stat.get('quotes_count', 0)}")
+    if crm_stat.get("total_leads", 0) > 0:
+        lines.append(f"• Cơ hội CRM: {crm_stat.get('total_leads', 0)} lead mới • Giá trị kỳ vọng: {Decimal(crm_stat.get('expected_revenue', 0)):,.2f} VNĐ")
+    if act_stat.get("total_activities", 0) > 0:
+        types_str = ", ".join(f"{k}: {v}" for k, v in act_stat.get("types", {}).items())
+        lines.append(f"• Hoạt động lịch Odoo: {act_stat.get('total_activities', 0)} hoạt động ({types_str})")
+
+    lines.append("")
+    lines.append("1. CHI TIẾT CÔNG VIỆC & DỰ ÁN (project.task):")
+    task_rows = tasks_sec.get("rows", [])
+    if task_rows:
+        done_list = [t for t in task_rows if t.get("is_closed") or t.get("state") in ("1_done", "done")]
+        overdue_list = [t for t in task_rows if not (t.get("is_closed") or t.get("state") in ("1_done", "done")) and str(t.get("date_deadline") or "")[:10] and str(t.get("date_deadline") or "")[:10] < date.today().isoformat()]
+        inprog_list = [t for t in task_rows if t not in done_list and t not in overdue_list]
+
+        if done_list:
+            lines.append(f"✅ Đã hoàn thành ({len(done_list)}):")
+            for t in done_list[:5]:
+                tid = f"[{t['id']}] " if t.get("id") else ""
+                lines.append(f"  - {tid}{t.get('name', '')}")
+            if len(done_list) > 5:
+                lines.append(f"  ... và {len(done_list) - 5} công việc khác.")
+        if inprog_list:
+            lines.append(f"⏳ Đang thực hiện ({len(inprog_list)}):")
+            for t in inprog_list[:5]:
+                tid = f"[{t['id']}] " if t.get("id") else ""
+                dl = f" (Hạn: {t['date_deadline']})" if t.get("date_deadline") else ""
+                lines.append(f"  - {tid}{t.get('name', '')}{dl}")
+            if len(inprog_list) > 5:
+                lines.append(f"  ... và {len(inprog_list) - 5} công việc khác.")
+        if overdue_list:
+            lines.append(f"⚠️ Quá hạn / Cần chú ý ({len(overdue_list)}):")
+            for t in overdue_list[:5]:
+                tid = f"[{t['id']}] " if t.get("id") else ""
+                lines.append(f"  - {tid}{t.get('name', '')} (Hạn: {t.get('date_deadline', 'Chưa rõ')})")
+            if len(overdue_list) > 5:
+                lines.append(f"  ... và {len(overdue_list) - 5} công việc khác.")
+    else:
+        lines.append("  Không có công việc nào được phân công trong kỳ.")
+
+    if sale_stat.get("total_orders", 0) > 0:
+        lines.append("")
+        lines.append("2. ĐƠN HÀNG & BÁO GIÁ (sale.order):")
+        for s in sales_sec.get("rows", [])[:5]:
+            st = STATES.get(s.get("state"), s.get("state"))
+            lines.append(f"  - [{s.get('name')}] {label(s.get('partner_id'))}: {Decimal(str(s.get('amount_total', 0))):,.2f} ({st})")
+
+    lines.append("")
+    lines.append("💡 NHẬN XÉT CỦA HỆ THỐNG DÀNH CHO QUẢN LÝ:")
+    done_rate_num = float(task_stat.get('done_rate', '0%').rstrip('%') or 0)
+    if done_rate_num >= 80:
+        lines.append(f"• Tiến độ công việc tốt: Hoàn thành {done_rate_num}% khối lượng công việc được giao.")
+    else:
+        lines.append(f"• Cần lưu ý: Tỷ lệ hoàn thành công việc đạt {done_rate_num}%, có {task_stat.get('overdue_count', 0)} việc quá hạn.")
+    if task_stat.get("overdue_count", 0) > 0:
+        lines.append(f"• Quản lý nên kiểm tra các task quá hạn để hỗ trợ tháo gỡ vướng mắc.")
+    if sale_stat.get("confirmed_count", 0) > 0:
+        lines.append(f"• Nhân viên có đóng góp doanh số thực tế: {Decimal(sale_stat.get('confirmed_value', 0)):,.2f} VNĐ trong kỳ.")
+
+    lines += ["", "Thời điểm lấy dữ liệu: " + result["finished_at"]]
+    return "\n".join(lines)
+
+
 def chat_summary(result):
     params = result["parameters"]
+    if params.get("report_type") == "employee_weekly":
+        return employee_weekly_chat_summary(result)
     title = LABELS.get(params["report_type"], "Báo cáo doanh thu và doanh số")
     lines = [title, f"Kỳ: {period_text(params)}", "Phạm vi công ty: " + ", ".join(f"ID {c}" for c in result["company_ids"])]
     for section in result["sections"]:

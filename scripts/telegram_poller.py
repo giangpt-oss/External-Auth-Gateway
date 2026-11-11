@@ -73,7 +73,7 @@ def run_poller():
     try:
         while True:
             try:
-                params = {"timeout": 10}
+                params = {"timeout": 10, "allowed_updates": '["message","edited_message","callback_query"]'}
                 if offset is not None:
                     params["offset"] = offset
 

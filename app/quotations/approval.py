@@ -11,6 +11,43 @@ from app.odoo.client import OdooAccessError, OdooError
 APPROVAL_METHOD = 'action_confirm'
 
 
+APPROVAL_LABELS = {'not_requested': 'Chưa yêu cầu duyệt', 'pending': 'Đang chờ cấp trên duyệt',
+                   'approved': 'Đã duyệt nội bộ', 'rejected': 'Bị từ chối duyệt',
+                   'review_required': 'Cần kiểm tra và xin duyệt lại nội dung',
+                   'configuration_required': 'Chưa xác minh được quy tắc duyệt phù hợp',
+                   'unknown': 'Chưa đọc được trạng thái duyệt'}
+
+
+def read_approval_status(ctx, result):
+    """Read Studio's actual decision separately from eligibility to send via Agent."""
+    company_id = result['company_id'][0]
+    adapter = QuotationApproval(ctx.service.client, ctx.user.odoo_uid, ctx.secret, company_id)
+    try:
+        state = adapter.inspect(result['id'])
+    except OdooError:
+        return {'status': 'unknown'}
+    approval = {'status': state['status'], 'scope': 'agent_send_gate', 'message': state['message']}
+    result['state'] = state['record'].get('state') or result['state']
+    ids = sorted({uid for rule in state['rules'] for uid in rule.get('approver_ids', [])})
+    if ids:
+        try:
+            people = adapter.call('res.users', 'search_read', [[('id', 'in', ids)]], fields=['name'])
+            approval['approvers'] = [p['name'] for p in people]
+        except OdooError:
+            pass
+    if state['status'] in ('approved', 'pending'):
+        from app.business.quotation_approval import require_review
+        from app.business.service import BusinessError, BusinessService
+
+        business = BusinessService(ctx)
+        business.company_id = company_id
+        try:
+            require_review(business, result)
+        except (BusinessError, OdooError):
+            approval['agent_review_required'] = True
+    return approval
+
+
 def approval_control(name):
     lowered = name.lower()
     return name.startswith('x_') and any(word in lowered for word in ('approv', 'duyet', 'grant'))

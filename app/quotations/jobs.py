@@ -122,7 +122,7 @@ class QuotePreparationWorker:
             from app.telegram.client import TelegramClient
             try:
                 TelegramClient(self.settings.TELEGRAM_BOT_TOKEN).send_message(scope.chat_id,
-                    'Đã kiểm tra xong nháp báo giá. Bạn muốn xem bản báo giá và thông tin cần bổ sung không? Chưa tạo báo giá trên Odoo.')
+                    'Đã kiểm tra xong nháp báo giá. Bạn có thể mở lại nháp để xem thông tin hiện tại.')
                 state = 'delivered'
             except Exception:
                 state = 'unknown'

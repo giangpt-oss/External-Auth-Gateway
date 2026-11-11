@@ -19,13 +19,13 @@ from google.auth.exceptions import GoogleAuthError, InvalidValue
 from sqlalchemy.exc import IntegrityError
 
 from app.auth.routes import get_auth_service
-from app.auth.service import AuthService
+from app.auth.service import AuthenticatedUser, AuthService
 from app.config import Settings
 from app.models import TELEGRAM_WEB_BINDING_PREFIX, LinkToken, Session, TelegramConnection, User
 from app.odoo.client import OdooClient, OdooError, OdooNetworkError
 from app.odoo.service import OdooService
 from app.portal.routes import templates
-from app.security import decrypt_secret, encrypt_secret, generate_secure_token, hash_token
+from app.security import decrypt_secret, encrypt_secret, ensure_utc, generate_secure_token, hash_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Telegram Bot"])
@@ -280,17 +280,49 @@ def finish_verification(
     session_id: str | None = Cookie(None),
     auth: AuthService = Depends(get_auth_service),
 ):
-    user, session = _session(auth, session_id)
     settings = request.app.state.settings
     if not settings.telegram_web_configured or not state or len(state) > 128:
         return _error("Yêu cầu xác minh Telegram không hợp lệ.")
 
+    user = None
+    session = None
+    session_res = auth.get_user_by_session(session_id) if session_id else None
+    if session_res:
+        user, session = session_res
+
     with request.app.state.session_factory() as db:
-        attempt = db.query(LinkToken).filter_by(
-            purpose=PURPOSE, token_hash=hash_token(state), user_id=user.id, session_id=session.id,
-        ).first()
         now = datetime.now(UTC)
-        if not attempt or db.query(LinkToken).filter(
+        attempt = db.query(LinkToken).filter_by(
+            purpose=PURPOSE, token_hash=hash_token(state),
+        ).first()
+
+        if not attempt or attempt.used_at is not None or ensure_utc(attempt.expires_at) <= now:
+            return _error("Phiên xác minh Telegram đã hết hạn hoặc đã được sử dụng.")
+
+        if not user or not session:
+            # Fallback for cross-domain redirects (e.g. started on localhost, redirected to ngrok callback)
+            sess_rec = db.get(Session, attempt.session_id)
+            if not sess_rec or ensure_utc(sess_rec.expires_at) <= now:
+                return RedirectResponse("/login?error=session_expired", status_code=303)
+            user_rec = db.get(User, attempt.user_id)
+            if not user_rec or not user_rec.active:
+                return RedirectResponse("/login?error=session_expired", status_code=303)
+            user = AuthenticatedUser(
+                id=user_rec.id,
+                tenant=user_rec.tenant,
+                database=user_rec.database,
+                odoo_uid=user_rec.odoo_uid,
+                login=user_rec.login,
+                name=user_rec.name,
+                partner_id=user_rec.partner_id,
+                tz=user_rec.tz,
+                active=user_rec.active,
+            )
+            session = sess_rec
+        elif attempt.user_id != user.id or attempt.session_id != session.id:
+            return _error("Phiên xác minh Telegram không khớp với người dùng hiện tại.")
+
+        if db.query(LinkToken).filter(
             LinkToken.id == attempt.id, LinkToken.used_at.is_(None), LinkToken.expires_at > now,
         ).update({"used_at": now}, synchronize_session=False) != 1:
             return _error("Phiên xác minh Telegram đã hết hạn hoặc đã được sử dụng.")
@@ -350,4 +382,28 @@ def finish_verification(
             _store_binding(db, user.id, claims)
     except (ValueError, IntegrityError):
         return _error("Tài khoản Telegram này đã được liên kết với hồ sơ khác.")
-    return RedirectResponse("/?status=telegram_verified", status_code=303)
+    resp = RedirectResponse("/?status=telegram_verified", status_code=303)
+    if not session_id:
+        new_token = generate_secure_token(32)
+        csrf_secret = generate_secure_token(32)
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(hours=settings.SESSION_LIFETIME_HOURS)
+        with request.app.state.session_factory() as db:
+            db.add(Session(
+                token_hash=hash_token(new_token),
+                user_id=user.id,
+                csrf_secret=csrf_secret,
+                expires_at=expires_at,
+            ))
+            db.commit()
+        is_production = settings.APP_ENV == "production"
+        resp.set_cookie(
+            key="session_id",
+            value=new_token,
+            max_age=settings.SESSION_LIFETIME_HOURS * 3600,
+            httponly=True,
+            samesite="lax",
+            secure=is_production or request.url.scheme == "https",
+            path="/",
+        )
+    return resp

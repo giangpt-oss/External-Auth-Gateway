@@ -211,3 +211,56 @@ def test_telegram_id_token_validates_signature_audience_and_nonce():
     tampered = jwt.encode(RSASigner(bad_key, "test"), claims).decode("ascii")
     with pytest.raises(GoogleAuthError):
         _decode_id_token(tampered, keys, "123", "expected")
+
+
+def test_web_verification_cross_domain_callback(temp_db_path, fernet_key, monkeypatch):
+    from app.telegram import web_verification
+
+    settings = Settings(
+        APP_ENV="test",
+        PUBLIC_BASE_URL="http://localhost:8080",
+        DATABASE_URL=f"sqlite:///{temp_db_path}",
+        ENCRYPTION_KEY=fernet_key,
+        ODOO_EMPLOYEE_TELEGRAM_ID_FIELD="x_telegram",
+        TELEGRAM_BOT_USERNAME="ExampleOfficeBot",
+        TELEGRAM_WEB_BASE_URL="https://portal.example.test",
+        TELEGRAM_WEB_CLIENT_ID="123",
+        TELEGRAM_WEB_CLIENT_SECRET="test-only",
+    )
+    app = create_app(settings)
+    monkeypatch.setattr("app.odoo.client.OdooClient.authenticate", lambda *args, **kwargs: 12)
+
+    def execute(self, **kwargs):
+        if kwargs["model"] == "hr.employee":
+            return [{"x_telegram": "42"}]
+        return [{"id": 12, "active": True, "share": False, "name": "Employee"}]
+
+    monkeypatch.setattr("app.odoo.client.OdooClient.execute", execute)
+    exchange = MagicMock(return_value={"id": 42, "preferred_username": "employee"})
+    monkeypatch.setattr(web_verification, "_exchange_code", exchange)
+
+    with TestClient(app, follow_redirects=False) as client:
+        # 1. Login on localhost
+        login = client.post("/auth/login", data={"login": "test@example.test", "secret": "key"})
+        assert login.status_code == 200
+        csrf = login.json()["csrf_token"]
+
+        # 2. Start verification
+        start = client.post("/connections/telegram/verify", data={"csrf_token": csrf})
+        assert start.status_code == 303
+        redirect = urlsplit(start.headers["location"])
+        params = parse_qs(redirect.query)
+        state = params["state"][0]
+
+        # 3. Simulate cross-domain callback on ngrok where session_id cookie is NOT sent
+        client.cookies.clear()
+        callback = {"code": "test-code", "state": state}
+        finish = client.get("/oauth/telegram/callback", params=callback)
+        assert finish.status_code == 303
+        assert "status=telegram_verified" in finish.headers["location"]
+        assert "session_id" in finish.cookies
+
+        # 4. Verify status is now verified with the newly established session
+        status_result = client.get("/connections/telegram/verification-status").json()
+        assert status_result["verified"] is True
+

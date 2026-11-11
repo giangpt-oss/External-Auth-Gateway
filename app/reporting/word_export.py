@@ -157,21 +157,66 @@ def _inventory(document, section):
 
 def _tasks(document, section):
     total = next((item for item in section["summary"] if "total_tasks" in item), {})
-    closed, overdue = total.get("closed_current"), total.get("overdue_current")
+    closed = total.get("closed_current", total.get("done_count"))
+    overdue = total.get("overdue_current", total.get("overdue_count"))
+    inprogress = total.get("inprogress_count")
     _paragraph(document, f"Có {section['count']} công việc phù hợp với bộ lọc. Trạng thái và người phụ trách thể hiện thời điểm truy vấn, không phải lịch sử xử lý trong kỳ.")
-    _table(document, ["Chỉ tiêu", "Số công việc"],
-           [["Tổng công việc", section["count"]], ["Đã đóng hiện tại", closed], ["Quá hạn hiện tại", overdue]],
-           [12.5, 4.5], numeric=(1,))
-    if overdue is not None:
+    table_rows = [["Tổng công việc", section["count"]], ["Đã hoàn thành", closed], ["Đang thực hiện", inprogress], ["Quá hạn hiện tại", overdue]]
+    _table(document, ["Chỉ tiêu", "Số công việc"], [r for r in table_rows if r[1] is not None], [12.5, 4.5], numeric=(1,))
+    if overdue:
         _paragraph(document, f"Có {overdue} công việc đang quá hạn theo trạng thái hiện tại. Cần xem hạn chót và người phụ trách trong phụ lục để xác định việc cần theo dõi.")
-    else:
-        _paragraph(document, "Chưa xác minh được trạng thái đóng của công việc nên chưa tính số quá hạn hoặc tỷ lệ hoàn thành.")
     groups = [s for s in section["summary"] if "project" in s]
     if groups:
         _table(document, ["Dự án", "Giai đoạn", "Số công việc"],
                [[g["project"], g["stage"], g["count"]] for g in groups[:DETAIL_LIMIT]], [6.5, 7.5, 3], numeric=(2,))
         if len(groups) > DETAIL_LIMIT:
             _paragraph(document, f"Bảng trên trình bày {DETAIL_LIMIT}/{len(groups)} nhóm dự án và giai đoạn. Yêu cầu Excel để xem đủ các nhóm.")
+
+
+def _employee_profile(document, section):
+    profile = section["summary"][0] if section.get("summary") else {}
+    _paragraph(document, f"Nhân viên: {profile.get('name', 'Chưa rõ')}")
+    _table(document, ["Thông tin", "Giá trị"],
+           [
+               ["Họ và tên", profile.get("name") or "Chưa rõ"],
+               ["Chức danh", profile.get("job_title") or "Chưa rõ"],
+               ["Phòng ban", profile.get("department") or "Chưa rõ"],
+               ["Quản lý trực tiếp", profile.get("manager") or "Chưa rõ"],
+               ["Email làm việc", profile.get("email") or "Chưa rõ"],
+               ["Điện thoại", profile.get("phone") or "Chưa rõ"],
+           ],
+           [6.0, 11.0])
+
+
+def _activities(document, section):
+    summary = section["summary"][0] if section.get("summary") else {}
+    total = summary.get("total_activities", section.get("count", 0))
+    types = summary.get("types", {})
+    _paragraph(document, f"Có {total} hoạt động được ghi nhận. Chi tiết các loại hoạt động:")
+    rows = [[k, str(v)] for k, v in types.items()] or [["Tất cả", str(total)]]
+    _table(document, ["Loại hoạt động", "Số lượng"], rows, [12.0, 5.0], numeric=(1,))
+
+
+def _employee_sales(document, section):
+    summary = section["summary"][0] if section.get("summary") else {}
+    _paragraph(document, f"Tổng số đơn và báo giá phụ trách: {summary.get('total_orders', 0)}")
+    _table(document, ["Chỉ tiêu", "Số lượng", "Giá trị"],
+           [
+               ["Báo giá đang xử lý (Draft / Sent)", str(summary.get("quotes_count", 0)), _money(summary.get("quotes_value", "0"))],
+               ["Đơn hàng đã chốt (Confirmed / Done)", str(summary.get("confirmed_count", 0)), _money(summary.get("confirmed_value", "0"))],
+           ],
+           [7.0, 4.0, 6.0], numeric=(1, 2))
+
+
+def _employee_crm(document, section):
+    summary = section["summary"][0] if section.get("summary") else {}
+    _paragraph(document, f"Có {section['count']} cơ hội CRM đang phụ trách.")
+    _table(document, ["Chỉ tiêu", "Giá trị"],
+           [
+               ["Tổng số cơ hội / lead", str(summary.get("total_leads", section.get("count", 0)))],
+               ["Tổng giá trị kỳ vọng", _money(summary.get("expected_revenue", "0"))],
+           ],
+           [8.0, 9.0], numeric=(1,))
 
 
 def _crm(document, section):
@@ -227,16 +272,26 @@ def _day(value, timezone):
     return datetime.fromisoformat(str(value)).strftime("%d/%m/%Y")
 
 
-def _appendix(document, section, timezone):
+def _appendix(document, section, timezone, report_type=None):
     rows = details(section)[:DETAIL_LIMIT]
+    kind = section["type"]
+    if kind == "employee_profile":
+        return
     document.add_heading("Chi tiết đối chiếu", 3)
     _paragraph(document,
         f"Phụ lục trình bày {len(rows)}/{section['count']} dòng. "
         "Các chỉ tiêu tổng hợp và nhận xét ở trên được tính từ toàn bộ dữ liệu, không chỉ các dòng trong phụ lục.")
     if section["count"] > DETAIL_LIMIT:
         _paragraph(document, "Phụ lục là phần trích đầu danh sách. Yêu cầu thêm Excel để nhận toàn bộ dữ liệu chi tiết.")
-    kind = section["type"]
-    if kind in FINANCIAL_TYPES:
+    if kind == "activities":
+        _table(document, ["Hoạt động", "Tài liệu liên quan", "Hạn chót", "Nội dung tóm tắt"],
+               [[label(r.get("activity_type_id")), _text(r.get("res_name")), _day(r.get("date_deadline"), timezone), _text(r.get("summary"))] for r in rows],
+               [4.0, 4.5, 3.0, 5.5])
+    elif kind == "sales" and report_type == "employee_weekly":
+        _table(document, ["Đơn hàng / Báo giá", "Khách hàng", "Ngày tạo / đặt", "Tổng tiền", "Trạng thái"],
+               [[r.get("name"), label(r.get("partner_id")), _day(r.get("date_order"), timezone), _money(r.get("amount_total")), STATES.get(r.get("state"), r.get("state"))] for r in rows],
+               [3.5, 5.0, 3.0, 3.5, 2.0], numeric=(3,))
+    elif kind in FINANCIAL_TYPES:
         date_field = {"revenue": "invoice_date", "sales": "date_order", "quotations": "create_date", "purchases": "date_approve", "purchase_rfqs": "create_date"}[kind]
         partner_label = "Nhà cung cấp" if kind in {"purchases", "purchase_rfqs"} else "Khách hàng"
         _table(document, ["Chứng từ", partner_label, "Ngày", "Tiền tệ", "Trước thuế", "Loại"],
@@ -315,7 +370,15 @@ def export_docx(result) -> bytes:
         if not section["count"]:
             _paragraph(document, "Không tìm thấy bản ghi phù hợp cho phần báo cáo này trong phạm vi đã chọn.")
             continue
-        if section["type"] in FINANCIAL_TYPES:
+        if section["type"] == "employee_profile":
+            _employee_profile(document, section)
+        elif section["type"] == "activities":
+            _activities(document, section)
+        elif section["type"] == "sales" and result.get("report_type") == "employee_weekly":
+            _employee_sales(document, section)
+        elif section["type"] == "crm" and result.get("report_type") == "employee_weekly":
+            _employee_crm(document, section)
+        elif section["type"] in FINANCIAL_TYPES:
             _financial(document, section)
         elif section["type"] == "inventory":
             _inventory(document, section)
@@ -327,7 +390,7 @@ def export_docx(result) -> bytes:
             _transfers(document, section)
         else:
             _tasks(document, section)
-        _appendix(document, section, timezone)
+        _appendix(document, section, timezone, report_type=result.get("report_type"))
     document.add_heading("Nguồn và giới hạn dữ liệu", 1)
     for warning in result.get("warnings", []):
         _paragraph(document, warning)

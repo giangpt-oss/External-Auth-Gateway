@@ -50,23 +50,27 @@ class VerifiedContext:
         return chosen
 
 
+def bound_telegram_user(db, user_id: int, binding: TelegramScope):
+    user = db.query(User).filter_by(id=user_id, active=True).first()
+    if not user:
+        raise HTTPException(404, "Không tìm thấy tài khoản đang hoạt động.")
+    conn = user.telegram_connection
+    if not conn or conn.status != "connected" or (
+        conn.telegram_user_id != binding.telegram_user_id
+        or conn.private_chat_id != binding.chat_id
+        or conn.binding_id != binding.telegram_binding_id
+    ):
+        raise HTTPException(403, "RECONNECT_REQUIRED: Liên kết Telegram đã thay đổi.")
+    return user
+
+
 @contextmanager
 def authenticated_context(request, user_id: int, binding: TelegramScope):
     # Import lazily to avoid a cycle when the internal router includes report routes.
     from app.internal.routes import _get_odoo_service, _verify_odoo_account
-
     settings = request.app.state.settings
     with request.app.state.session_factory() as db:
-        user = db.query(User).filter_by(id=user_id, active=True).first()
-        if not user:
-            raise HTTPException(404, "Không tìm thấy tài khoản đang hoạt động.")
-        conn = user.telegram_connection
-        if not conn or conn.status != "connected" or (
-            conn.telegram_user_id != binding.telegram_user_id
-            or conn.private_chat_id != binding.chat_id
-            or conn.binding_id != binding.telegram_binding_id
-        ):
-            raise HTTPException(403, "RECONNECT_REQUIRED: Liên kết Telegram đã thay đổi.")
+        user = bound_telegram_user(db, user_id, binding)
         if not user.credential or not settings.ENCRYPTION_KEY:
             raise HTTPException(403, "Thiếu thông tin xác thực Odoo.")
         try:

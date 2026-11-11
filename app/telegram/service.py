@@ -2,6 +2,7 @@ import base64
 import html
 import io
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,7 +13,12 @@ from sqlalchemy.orm import sessionmaker
 from app.models import LinkToken, OdooCredential, TelegramConnection, User
 from app.odoo.client import OdooAccessError, OdooClient, OdooError
 from app.security import decrypt_secret, ensure_utc, generate_secure_token, hash_token
-from app.telegram.client import TelegramClient, normalize_agent_response
+from app.telegram.client import (
+    CONFIRMATION_ID,
+    TelegramClient,
+    agent_delivery_chunks,
+    normalize_agent_response,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -106,6 +112,8 @@ class TelegramService:
         Gateway commands (/start, /help, /status, /crm) are processed immediately.
         Conversational AI turns are stored with status='pending' (or rejected if forwarding disabled).
         """
+        if "callback_query" in update:
+            return self._ingest_confirmation_callback(update)
         message = update.get("message") or update.get("edited_message")
         if not message:
             return {"status": "ignored", "reason": "No message"}
@@ -212,7 +220,35 @@ class TelegramService:
 
         return {"status": "ok"}
 
+    def _ingest_confirmation_callback(self, update: dict[str, Any]) -> dict[str, Any]:
+        callback = update["callback_query"]
+        if not isinstance(callback, dict):
+            return {"status": "ignored", "reason": "Invalid callback"}
+        callback_id = callback.get("id")
+        data = callback.get("data")
+        choice = re.fullmatch(rf"(confirm|cancel):({CONFIRMATION_ID})", data) if isinstance(data, str) else None
+        message = callback.get("message") or {}
+        actor = callback.get("from") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+        result = {"status": "ignored", "reason": "Invalid confirmation callback"}
+        if (choice and type(chat_id) is int and chat_id == actor.get("id")
+                and chat.get("type") == "private" and not actor.get("is_bot")):
+            command, confirmation_id = choice.groups()
+            result = self.ingest_update({"update_id": update.get("update_id"), "message": {
+                "chat": chat, "from": actor, "text": f"/{command} {confirmation_id}",
+            }})
+        if isinstance(callback_id, str) and callback_id:
+            self.telegram_client.answer_callback_query(callback_id)
+        if result["status"] == "ok" and not result.get("duplicate") and self.enable_ai_forwarding and type(message_id) is int:
+            self.telegram_client.clear_inline_keyboard(chat_id, message_id)
+        return result
+
     def process_update_dict(self, update: dict[str, Any]) -> None:
+        if "callback_query" in update:
+            self.ingest_update(update)
+            return
         message = update.get("message") or update.get("edited_message")
         if not message:
             return
@@ -363,9 +399,7 @@ class TelegramService:
         safe_name = html.escape(target_user_name)
         welcome_text = (
             f"🎉 <b>Liên kết thành công!</b>\n\n"
-            f"Xin chào <b>{safe_name}</b>, tài khoản Telegram của bạn đã được kết nối an toàn với Odoo.\n\n"
-            f"Bạn có thể trao đổi bằng lời bình thường để tra cứu dữ liệu, lập báo cáo hoặc thực hiện công việc. "
-            f"Tôi sẽ hỏi thông tin còn thiếu và xin xác nhận trước khi thay đổi dữ liệu. Bạn muốn bắt đầu việc gì?"
+            f"Xin chào <b>{safe_name}</b>! Tôi có thể giúp gì cho bạn hôm nay?"
         )
         try:
             self.telegram_client.send_message(chat_id, welcome_text)
@@ -382,14 +416,10 @@ class TelegramService:
             if conn:
                 user = db.query(User).filter_by(id=conn.user_id).first()
                 user_name = user.name if user else "bạn"
-                msg = (
-                    f"👋 Xin chào <b>{html.escape(user_name)}</b>! Bạn đã liên kết với hệ thống Odoo.\n\n"
-                    f"Bạn muốn tra cứu thông tin hay thực hiện công việc gì? Hãy mô tả yêu cầu của bạn."
-                )
+                msg = f"Xin chào <b>{html.escape(user_name)}</b>! Tôi có thể giúp gì cho bạn hôm nay?"
             else:
                 msg = (
-                    "👋 Xin chào! Để liên kết tài khoản Odoo của bạn với bot này, "
-                    "vui lòng đăng nhập vào Cổng Portal Auth Gateway trên trình duyệt và bấm <b>'Liên kết Telegram'</b>."
+                    "Xin chào! Để sử dụng trợ lý, vui lòng đăng nhập vào Cổng Portal Auth Gateway trên trình duyệt và bấm <b>'Liên kết Telegram'</b>."
                 )
         try:
             self.telegram_client.send_message(chat_id, msg)
@@ -779,10 +809,7 @@ class TelegramService:
         # 5. Deliver messages and internal artifacts; unknown sends are never replayed.
         if delivery is None:
             return
-        chunks = [
-            chunk for message in delivery["messages"] for chunk in self._split_text(message)
-        ]
-        chunks.extend({"type": "document", **item} for item in delivery["attachments"])
+        chunks = agent_delivery_chunks(delivery, self._split_text)
         if update_id:
             with self.session_factory() as db:
                 from app.models import TelegramUpdate
@@ -805,6 +832,8 @@ class TelegramService:
                 self._verify_ai_recipient(user_id, telegram_user_id, chat_id, binding_id)
                 if isinstance(chunk, str):
                     self.telegram_client.send_message(chat_id, chunk, parse_mode="")
+                elif chunk["type"] == "confirmation":
+                    self.telegram_client.send_message(chat_id, chunk["text"], confirmation_id=chunk["confirmation_id"])
                 else:
                     self._send_ai_attachment(
                         user_id, telegram_user_id, chat_id, binding_id, chunk["artifact_id"]

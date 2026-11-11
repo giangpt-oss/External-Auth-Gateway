@@ -9,6 +9,60 @@ from app.telegram.client import TelegramClient
 from app.telegram.service import TelegramService
 
 
+@pytest.mark.parametrize('choice', ['confirm', 'cancel'])
+def test_confirmation_button_is_queued_as_a_scoped_command(telegram_components, choice):
+    import json
+
+    from app.models import TelegramUpdate
+
+    service, sf, _, client = telegram_components
+    service.enable_ai_forwarding = True
+    update = {'update_id': 801, 'callback_query': {
+        'id': 'click', 'from': {'id': 7}, 'data': f'{choice}:c_0123abcd',
+        'message': {'message_id': 41, 'chat': {'id': 7, 'type': 'private'}, 'from': {'id': 99, 'is_bot': True}},
+    }}
+    assert service.ingest_update(update)['status'] == 'ok'
+    assert service.ingest_update(update)['duplicate']
+    with sf() as db:
+        stored = json.loads(db.query(TelegramUpdate).one().payload)
+        assert stored['message']['text'] == f'/{choice} c_0123abcd'
+        assert stored['message']['from']['id'] == 7
+    client.answer_callback_query.assert_called_with('click')
+    client.clear_inline_keyboard.assert_called_once_with(7, 41)
+
+
+def test_confirmation_callback_in_group_is_ignored(telegram_components):
+    service, _, _, client = telegram_components
+    assert service.ingest_update({'update_id': 802, 'callback_query': {
+        'id': 'click', 'from': {'id': 7}, 'data': 'confirm:c_0123abcd',
+        'message': {'message_id': 41, 'chat': {'id': -1, 'type': 'group'}},
+    }})['status'] == 'ignored'
+    client.answer_callback_query.assert_called_once_with('click')
+    client.clear_inline_keyboard.assert_not_called()
+
+
+def test_preview_buttons_follow_the_last_chunk():
+    from app.telegram.client import agent_delivery_chunks, normalize_agent_response
+
+    delivery = normalize_agent_response({'messages': ['first last', 'next'],
+                                         'confirmation_buttons': {'0': 'c_0123abcd'}})
+    assert agent_delivery_chunks(delivery, str.split) == [
+        'first', {'type': 'confirmation', 'text': 'last', 'confirmation_id': 'c_0123abcd'}, 'next',
+    ]
+
+
+def test_telegram_send_message_includes_inline_buttons(monkeypatch):
+    post = MagicMock()
+    post.return_value.status_code = 200
+    post.return_value.json.return_value = {'ok': True, 'result': {'message_id': 41}}
+    monkeypatch.setattr('app.telegram.client.httpx.post', post)
+    TelegramClient('test-token').send_message(7, 'Xem trước báo giá', confirmation_id='c_0123abcd')
+    assert post.call_args.kwargs['json']['reply_markup']['inline_keyboard'] == [[
+        {'text': 'Xác nhận', 'callback_data': 'confirm:c_0123abcd'},
+        {'text': 'Từ chối', 'callback_data': 'cancel:c_0123abcd'},
+    ]]
+
+
 @pytest.fixture
 def telegram_components(temp_db_path):
     engine, session_factory = init_db(f"sqlite:///{temp_db_path}")

@@ -256,3 +256,49 @@ def test_execution_outbox_persists_result_and_never_replays(payload, monkeypatch
         if not fails:
             assert json.loads(op.result_json)['result']['name'] == 'S0099'
     engine.dispose()
+def test_missing_price_and_tax_are_left_for_odoo(payload):
+    line = payload['lines'][0]
+    for name in ('price_unit', 'price_confirmed', 'tax_ids'):
+        line.pop(name)
+    result = QuotationFixture().prepare(payload)
+    assert result['status'] == 'ready'
+    values = result['values']['order_line'][0][2]
+    assert 'price_unit' not in values and 'tax_id' not in values
+
+
+def test_customer_addresses_are_left_to_odoo_when_not_supplied(payload):
+    class RequiredAddresses(QuotationFixture):
+        def _schema(self, model):
+            fields = super()._schema(model)
+            if model == 'sale.order':
+                for field in ('partner_invoice_id', 'partner_shipping_id'):
+                    fields[field] = {'type': 'many2one', 'relation': 'res.partner',
+                                     'string': field, 'required': True, 'readonly': False}
+            return fields
+
+    result = RequiredAddresses().prepare(payload)
+    assert result['status'] == 'ready'
+    assert 'partner_invoice_id' not in result['values']
+    assert 'partner_shipping_id' not in result['values']
+
+
+def test_create_reports_the_exact_required_studio_field(payload):
+    from app.odoo.client import OdooError
+    from app.quotations.service import QuotationMissingFields
+
+    class StudioFixture(QuotationFixture):
+        def _schema(self, model):
+            fields = super()._schema(model)
+            if model == 'sale.order':
+                fields['x_reference'] = {'type': 'char', 'string': 'Mã nội bộ'}
+            return fields
+
+        def _rpc(self, model, method, args, company_id=None, **kwargs):
+            if model == 'sale.order' and method == 'create':
+                raise OdooError('A mandatory field is not set.\nModel: Sales Order (sale.order)\nField: Reference (x_reference)')
+            return super()._rpc(model, method, args, company_id, **kwargs)
+
+    with pytest.raises(QuotationMissingFields) as exc:
+        StudioFixture().create('op_missing', payload)
+    assert exc.value.details == {'missing_fields': ['custom_fields.x_reference'],
+                                 'field_labels': {'custom_fields.x_reference': 'Mã nội bộ'}}

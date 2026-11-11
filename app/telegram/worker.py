@@ -15,6 +15,7 @@ from app.models import TelegramConnection, TelegramUpdate, User
 from app.telegram.client import (
     TelegramClient,
     TelegramDeliveryUnknownError,
+    agent_delivery_chunks,
     normalize_agent_response,
 )
 
@@ -704,7 +705,7 @@ class TelegramAIWorker:
                     )
                     return True
 
-                if delivery["attachments"]:
+                if delivery["attachments"] or delivery["confirmation_buttons"]:
                     delivery["telegram_binding_id"] = current_binding_id
                     ai_response_str = json.dumps(delivery, ensure_ascii=False)
                 else:
@@ -836,16 +837,13 @@ class TelegramAIWorker:
         expected_binding_id = (
             stored_response.get("telegram_binding_id") if isinstance(stored_response, dict) else None
         )
-        if delivery["attachments"] and not expected_binding_id:
-            self._mark_delivery_failed(update_db_id, claim_token, "Document delivery lacks original binding")
+        if (delivery["attachments"] or delivery["confirmation_buttons"]) and not expected_binding_id:
+            self._mark_delivery_failed(update_db_id, claim_token, "Structured delivery lacks original binding")
             return True
 
         # Prepare chunks if not already prepared
         if not delivery_chunks_str:
-            all_chunks = []
-            for msg in delivery["messages"]:
-                all_chunks.extend(self._split_text(msg, max_length=4000))
-            all_chunks.extend({"type": "document", **item} for item in delivery["attachments"])
+            all_chunks = agent_delivery_chunks(delivery, self._split_text)
 
             delivery_chunks_str = json.dumps(all_chunks, ensure_ascii=False)
             delivery_index = 0
@@ -887,7 +885,7 @@ class TelegramAIWorker:
             chunk = all_chunks[idx]
 
             artifact = None
-            if isinstance(chunk, dict):
+            if isinstance(chunk, dict) and chunk.get("type") != "confirmation":
                 try:
                     if chunk.get("type") != "document" or not expected_binding_id:
                         raise ValueError("Invalid document delivery chunk")
@@ -920,6 +918,8 @@ class TelegramAIWorker:
                         chat_id, artifact["filename"], artifact["content"],
                         content_type=artifact["content_type"],
                     )
+                elif isinstance(chunk, dict):
+                    self.telegram_client.send_message(chat_id, chunk["text"], confirmation_id=chunk["confirmation_id"])
                 else:
                     self.telegram_client.send_message(chat_id, chunk, parse_mode="")
             except (TelegramDeliveryUnknownError, httpx.TimeoutException, httpx.NetworkError) as e:

@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -6,6 +7,7 @@ import httpx
 from app.telegram.text import plain_text
 
 _logger = logging.getLogger(__name__)
+CONFIRMATION_ID = r"c_[0-9a-f]{8}"
 
 
 class TelegramError(Exception):
@@ -48,7 +50,30 @@ def normalize_agent_response(payload: Any) -> dict[str, Any]:
         if set(attachment) - {"artifact_id", "filename", "content_type"}:
             raise ValueError("Attachment accepts only an internal artifact reference")
         normalized.append({"artifact_id": artifact_id})
-    return {"messages": [plain_text(message) for message in messages], "attachments": normalized}
+    buttons = payload.get("confirmation_buttons", {})
+    message_indices = {str(index) for index in range(len(messages))}
+    if not isinstance(buttons, dict) or any(
+        index not in message_indices
+        or not isinstance(cid, str) or not re.fullmatch(CONFIRMATION_ID, cid)
+        for index, cid in buttons.items()
+    ):
+        raise ValueError("Invalid confirmation button descriptor")
+    return {"messages": [plain_text(message) for message in messages], "attachments": normalized,
+            "confirmation_buttons": buttons}
+
+
+def agent_delivery_chunks(delivery, split_text):
+    chunks = []
+    for index, message in enumerate(delivery["messages"]):
+        parts = split_text(message)
+        confirmation_id = delivery["confirmation_buttons"].get(str(index))
+        if parts and confirmation_id:
+            chunks.extend(parts[:-1])
+            chunks.append({"type": "confirmation", "text": parts[-1], "confirmation_id": confirmation_id})
+        else:
+            chunks.extend(parts)
+    chunks.extend({"type": "document", **item} for item in delivery["attachments"])
+    return chunks
 
 
 class TelegramClient:
@@ -66,6 +91,7 @@ class TelegramClient:
         text: str,
         parse_mode: str = "",
         disable_web_page_preview: bool = True,
+        confirmation_id: str | None = None,
     ) -> dict[str, Any]:
         if not self.bot_token:
             _logger.warning("Telegram Bot Token is not configured. Skipping send_message.")
@@ -78,6 +104,11 @@ class TelegramClient:
             "text": plain_text(text),
             "disable_web_page_preview": disable_web_page_preview,
         }
+        if confirmation_id:
+            payload["reply_markup"] = {"inline_keyboard": [[
+                {"text": "Xác nhận", "callback_data": f"confirm:{confirmation_id}"},
+                {"text": "Từ chối", "callback_data": f"cancel:{confirmation_id}"},
+            ]]}
 
         try:
             resp = httpx.post(url, json=payload, timeout=15.0)
@@ -101,6 +132,24 @@ class TelegramClient:
             return data.get("result", {})
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise TelegramDeliveryUnknownError(f"Network error connecting to Telegram: {e}") from e
+
+    def answer_callback_query(self, callback_id: str) -> None:
+        self._update_callback_ui("answerCallbackQuery", {"callback_query_id": callback_id})
+
+    def clear_inline_keyboard(self, chat_id: int, message_id: int) -> None:
+        self._update_callback_ui("editMessageReplyMarkup", {
+            "chat_id": chat_id, "message_id": message_id, "reply_markup": {"inline_keyboard": []},
+        })
+
+    def _update_callback_ui(self, method: str, payload: dict) -> None:
+        if self.bot_token:
+            try:
+                response = httpx.post(self._get_url(method), json=payload, timeout=3.0)
+                result = response.json()
+                if not response.is_success or not isinstance(result, dict) or not result.get("ok"):
+                    _logger.debug("Telegram rejected %s", method)
+            except (httpx.HTTPError, ValueError):
+                _logger.debug("Telegram callback UI update failed for %s", method)
 
     def send_document(
         self,

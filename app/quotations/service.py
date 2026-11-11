@@ -13,6 +13,12 @@ class QuotationValidationError(ValueError):
     """The submitted quotation cannot be safely prepared or created."""
 
 
+class QuotationMissingFields(QuotationValidationError):
+    def __init__(self, fields, labels=None):
+        super().__init__('Odoo cần bổ sung thông tin báo giá.')
+        self.details = {'missing_fields': fields, 'field_labels': labels or {}}
+
+
 LOOKUPS = {
     "partners": "res.partner",
     "products": "product.product",
@@ -125,7 +131,7 @@ class QuotationService:
         company_id, allowed = self._companies(company_id)
         self._check_create()
         result = {"company_id": company_id, "allowed_company_ids": allowed, "models": {},
-                  "pricing": "user_confirmed", "totals": "Odoo tính chính thức sau khi tạo nháp."}
+                  "pricing": "odoo_default_or_explicit", "totals": "Odoo tính chính thức sau khi tạo nháp."}
         for model in ("sale.order", "sale.order.line"):
             editable = self._editable(model)
             defaults = self._rpc(model, "default_get", [list(editable)], company_id)
@@ -159,12 +165,24 @@ class QuotationService:
             domain += ["|", ("company_id", "=", False), ("company_id", "=", company_id)]
         if kind == "companies":
             domain.append(("id", "in", allowed))
-        if query.strip():
-            domain.append(("display_name", "ilike", query.strip()[:150]))
         if kind == "taxes":
             domain.append(("type_tax_use", "in", ["sale", "none"]))
         if kind == "products" and "sale_ok" in schema:
             domain.append(("sale_ok", "=", True))
+        if query.strip() and kind in ('partners', 'products'):
+            term = query.strip()[:150].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            searchable = [field for field in ('display_name', 'name', 'default_code') if field in schema]
+            if searchable:
+                exact_domain = domain + ['|'] * (len(searchable) - 1) + [(field, '=ilike', term) for field in searchable]
+                exact = self._rpc(model, 'search_read', [exact_domain], company_id, fields=fields, order='id asc', limit=2)
+                if len(exact) == 1:
+                    return {'kind': kind, 'company_id': company_id, 'items': exact, 'exact_match_unique': True}
+        if query.strip():
+            term = query.strip()[:150]
+            if kind == 'products' and 'default_code' in schema:
+                domain += ['|', ('display_name', 'ilike', term), ('default_code', 'ilike', term)]
+            else:
+                domain.append(('display_name', 'ilike', term))
         rows = self._rpc(model, "search_read", [domain], company_id, fields=fields, order="id asc", limit=max(1, min(int(limit), 20)))
         return {"kind": kind, "company_id": company_id, "items": rows}
 
@@ -215,6 +233,9 @@ class QuotationService:
         unknown = set(payload) - ORDER_FIELDS - {"lines", "custom_fields"}
         if unknown:
             raise QuotationValidationError("Trường báo giá chưa hỗ trợ: " + ", ".join(sorted(unknown)))
+        raw_lines = payload.get('lines', [])
+        if not isinstance(raw_lines, list) or len(raw_lines) > 100:
+            raise QuotationValidationError('Báo giá phải có tối đa 100 dòng hàng.')
         company_id, _ = self._companies(payload.get("company_id"))
         meta = self.metadata(company_id)
         missing, values = [], {"company_id": company_id}
@@ -234,8 +255,6 @@ class QuotationService:
                     if payload.get(field):
                         self._record('res.partner', payload[field], company_id)
                         values[field] = payload[field]
-                    elif not order_fields[field].get('required'):
-                        values[field] = False
         relations = {"pricelist_id": ("product.pricelist", "property_product_pricelist"),
                      "payment_term_id": ("account.payment.term", "property_payment_term_id"),
                      "fiscal_position_id": ("account.fiscal.position", "property_account_position_id")}
@@ -252,11 +271,13 @@ class QuotationService:
                         raise QuotationValidationError("Tiền tệ không khớp bảng giá. Chọn bảng giá có tiền tệ mong muốn.")
                     if currency_id:
                         values["currency_id"] = currency_id
-            elif not order_fields[field].get('required'):
-                values[field] = False
-        if not values.get("currency_id"):
+        catalog_price = any(isinstance(line, dict) and line.get('use_catalog_price') is True
+                            for line in raw_lines)
+        if not values.get("currency_id") and (payload.get('currency_id') or catalog_price):
             company = self._record("res.company", company_id, company_id, ["id", "currency_id"])
-            currency_id = _m2o(company.get("currency_id"))
+            pricelist_id = _m2o((partner or {}).get('property_product_pricelist'))
+            pricelist = self._record('product.pricelist', pricelist_id, company_id, ['id', 'currency_id']) if pricelist_id else {}
+            currency_id = _m2o(pricelist.get('currency_id')) or _m2o(company.get("currency_id"))
             if payload.get("currency_id") and payload["currency_id"] != currency_id:
                 raise QuotationValidationError("Tiền tệ không khớp công ty; hãy chọn bảng giá có tiền tệ mong muốn.")
             if currency_id:
@@ -282,9 +303,6 @@ class QuotationService:
         for name, spec in meta['models']['sale.order']['fields'].items():
             if name.startswith('x_') and spec.get('supported') and not spec.get('required') and name not in values:
                 values[name] = False
-        raw_lines = payload.get("lines", [])
-        if not isinstance(raw_lines, list) or len(raw_lines) > 100:
-            raise QuotationValidationError("Báo giá phải có tối đa 100 dòng hàng.")
         if not raw_lines:
             missing.append("lines")
         commands, preview_lines, normalized_lines = [], [], []
@@ -308,9 +326,7 @@ class QuotationService:
             if product.get("sale_ok") is False:
                 raise QuotationValidationError("Sản phẩm không được phép bán.")
             vals = {"product_id": product["id"], "name": str(line.get("name") or product.get("display_name") or product["id"])[:2000]}
-            if line.get("quantity") is None:
-                missing.append(f"{prefix}.quantity")
-            else:
+            if line.get('quantity') is not None:
                 vals["product_uom_qty"] = _number(line["quantity"], "Số lượng", True)
             if "customer_lead" in line:
                 if "customer_lead" not in meta["models"]["sale.order.line"]["fields"]:
@@ -325,9 +341,7 @@ class QuotationService:
                 if product_currency and product_currency != values.get('currency_id'):
                     raise QuotationValidationError('Giá niêm yết khác tiền tệ báo giá; cần chốt giá quy đổi trước.')
                 vals['price_unit'] = _number(product.get('list_price'), 'Giá niêm yết')
-            elif line.get("price_unit") is None or line.get("price_confirmed") is not True:
-                missing.append(f"{prefix}.price_unit_confirmed")
-            else:
+            elif line.get("price_unit") is not None:
                 vals["price_unit"] = _number(line["price_unit"], "Đơn giá")
             uom_id = line.get("uom_id") or _m2o(product.get("uom_id"))
             if uom_id:
@@ -342,11 +356,9 @@ class QuotationService:
             tax_ids = line.get('tax_ids')
             tax_labels = []
             # Explicit [] means the user selected no tax. Never guess a fiscal-position mapping.
-            if tax_ids is None:
-                missing.append(f"{prefix}.tax_ids")
-            elif not isinstance(tax_ids, list) or len(tax_ids) > 20:
+            if tax_ids is not None and (not isinstance(tax_ids, list) or len(tax_ids) > 20):
                 raise QuotationValidationError("Danh sách thuế không hợp lệ.")
-            else:
+            if tax_ids is not None:
                 for tax_id in tax_ids:
                     tax = self._record('account.tax', tax_id, company_id, ['id', 'type_tax_use', 'display_name'])
                     tax_labels.append(tax.get('display_name') or str(tax_id))
@@ -363,9 +375,9 @@ class QuotationService:
             for name, spec in meta["models"]["sale.order.line"]["fields"].items():
                 # Standard Odoo computes this on creation; required ORM metadata
                 # does not make it a mandatory user input (nor an expiry date).
-                if name == 'customer_lead':
+                if name in ('customer_lead', 'product_uom_qty', 'product_uom', 'product_uom_id', 'price_unit', 'tax_id', 'tax_ids'):
                     continue
-                if spec.get('required') and name not in vals:
+                if spec.get('required') and name not in vals and name not in meta['models']['sale.order.line']['defaults']:
                     missing.append(f"{prefix}.custom_fields.{name}" if name.startswith("x_") else f"{prefix}.{name}")
             commands.append([0, 0, vals])
             normalized_lines.append(dict(line, uom_id=uom_id, **({'customer_lead': vals['customer_lead']} if 'customer_lead' in vals else {}),
@@ -379,7 +391,8 @@ class QuotationService:
                                   'custom_fields': [{'label': spec.get('string') or name, 'value': line_custom.get(name)} for name, spec in meta['models']['sale.order.line']['fields'].items() if name.startswith('x_')],
                                   "suggested_price": product.get("list_price"), "customer_lead": vals.get('customer_lead')})
         for name, spec in meta["models"]["sale.order"]["fields"].items():
-            if spec.get('required') and name not in values:
+            if (spec.get('required') and name not in values and name not in meta['models']['sale.order']['defaults']
+                    and name not in ('partner_invoice_id', 'partner_shipping_id', 'currency_id')):
                 missing.append(f"custom_fields.{name}" if name.startswith("x_") else name)
         values["order_line"] = commands
         normalized = dict(payload, company_id=company_id)
@@ -393,7 +406,7 @@ class QuotationService:
                 "missing_fields": list(dict.fromkeys(missing)), "values": values, "metadata": meta,
                 "preview": {"fields": fields, "customer": partner.get("display_name") if partner else None,
                             "company_id": company_id, "currency_id": values.get("currency_id"), "lines": preview_lines,
-                            "totals_provisional": True, "notice": "Đơn giá do người dùng chốt; tổng và thuế chính thức do Odoo tính khi tạo nháp."}}
+                            "totals_provisional": True, "notice": "Odoo tính các giá trị mặc định và tổng chính thức khi tạo báo giá."}}
 
     def preview_fields(self, payload, values, company_id, meta):
         labels = {'name': 'Số báo giá', 'company_id': 'Công ty', 'partner_id': 'Khách hàng',
@@ -465,11 +478,23 @@ class QuotationService:
         self._operation(operation_id)
         prepared = self.prepare(payload)
         if prepared["status"] != "ready":
-            raise QuotationValidationError("Còn thiếu thông tin: " + ", ".join(prepared["missing_fields"]))
+            fields = prepared['missing_fields']
+            models = prepared['metadata']['models']
+            labels = {path: models['sale.order.line' if path.startswith('lines.') else 'sale.order']['fields']
+                      .get(path.split('.')[-1], {}).get('string') for path in fields}
+            raise QuotationMissingFields(fields, labels)
         values = prepared["values"]
         values["state"] = "draft"
         company_id = values["company_id"]
-        order_id = self._rpc("sale.order", "create", [values], company_id)
+        try:
+            order_id = self._rpc("sale.order", "create", [values], company_id)
+        except (OdooAccessError, OdooNetworkError):
+            raise
+        except OdooError as exc:
+            missing = self._missing_from_create_error(str(exc), payload)
+            if missing:
+                raise missing from exc
+            raise
         self._records.clear()  # Read-back must observe fresh provider state after the write.
         if not isinstance(order_id, int) or isinstance(order_id, bool):
             raise OdooNetworkError("Odoo không trả ID rõ ràng sau create; phải đối soát trước khi thử lại.")
@@ -498,6 +523,8 @@ class QuotationService:
                 uom_field = "product_uom_id" if "product_uom_id" in expected else "product_uom"
                 tax_field = 'tax_ids' if 'tax_ids' in expected else 'tax_id'
                 for name in ("product_id", "product_uom_qty", "price_unit", tax_field, uom_field, *(['customer_lead'] if 'customer_lead' in expected else [])):
+                    if name not in expected:
+                        continue
                     actual_value = actual.get(name)
                     expected_value = expected.get(name)
                     if name in {"product_id", "product_uom", "product_uom_id"}:
@@ -518,3 +545,28 @@ class QuotationService:
             "Chứng từ đã được tạo nhưng trạng thái đọc lại không phải nháp. Hãy kiểm tra trên Odoo trước khi thực hiện tiếp."
         )
         return result
+
+    def _missing_from_create_error(self, message, payload):
+        # A field must be explicitly named in a mandatory-field error and be writable in this workflow.
+        if not re.search(r'mandatory|required|not.null|bắt buộc', message, re.I):
+            return None
+        if not re.search(r'\bsale[._]order\b|\bsale_order_line\b', message):
+            return None
+        model = 'sale.order.line' if re.search(r'\bsale\.order\.line\b|\bsale_order_line\b', message) else 'sale.order'
+        match = re.search(r'(?:Field|Trường)[^\n]*?\(([a-z][a-z0-9_]*)\)|column "([a-z][a-z0-9_]*)"', message, re.I)
+        if not match:
+            return None
+        field = match[1] or match[2]
+        spec = self._schema(model).get(field, {})
+        if not spec or spec.get('readonly') or approval_control(field):
+            return None
+        aliases = {'product_uom_qty': 'quantity', 'product_uom': 'uom_id', 'product_uom_id': 'uom_id', 'tax_id': 'tax_ids'}
+        key = 'custom_fields.' + field if field.startswith('x_') and field in self._editable(model) else aliases.get(field, field)
+        if model == 'sale.order.line':
+            if field not in LINE_FIELDS and not key.startswith('custom_fields.'):
+                return None
+            paths = [f'lines.{i}.{key}' for i, line in enumerate(payload.get('lines', []))
+                     if (line.get('custom_fields', {}) if key.startswith('custom_fields.') else line).get(key.split('.')[-1]) is None]
+        else:
+            paths = [key] if field in ORDER_FIELDS or key.startswith('custom_fields.') else []
+        return QuotationMissingFields(paths, dict.fromkeys(paths, spec.get('string'))) if paths else None
