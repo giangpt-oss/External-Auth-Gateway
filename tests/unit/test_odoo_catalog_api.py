@@ -113,6 +113,31 @@ def test_query_odoo_records_success(catalog_api_client):
         assert kwargs["kwargs"]["limit"] == 5
 
 
+def test_query_odoo_count_only(catalog_api_client):
+    client, secret = catalog_api_client
+    with patch("app.odoo.service.OdooService.validate_user_account", return_value={"uid": 10, "name": "Test User", "active": True}), \
+         patch("app.odoo.client.OdooClient.execute", return_value=168) as mock_exec:
+        resp = client.post(
+            "/internal/v1/users/1/odoo/query",
+            headers={"Authorization": f"Bearer {secret}"},
+            json={
+                "model": "res.partner",
+                "count_only": True,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "OK"
+        assert data["total_count"] == 168
+        assert data["count"] == 0
+        assert data["items"] == []
+
+        mock_exec.assert_called_once()
+        kwargs = mock_exec.call_args[1]
+        assert kwargs["model"] == "res.partner"
+        assert kwargs["method"] == "search_count"
+
+
 def test_query_odoo_disallowed_model_rejected(catalog_api_client):
     client, secret = catalog_api_client
     with patch("app.odoo.service.OdooService.validate_user_account", return_value={"uid": 10, "name": "Test User", "active": True}):

@@ -108,6 +108,22 @@ class OdooService:
             "manager_name": None,
         }
 
+    def get_employee_telegram_id(self, uid: int, secret: str, field: str) -> int | None:
+        records = self.client.execute(
+            uid=uid, secret=secret, model="hr.employee", method="search_read",
+            args=[[("user_id", "=", uid)]],
+            kwargs={"fields": [field], "limit": 2},
+        )
+        if not isinstance(records, list) or len(records) != 1:
+            return None
+        value = records[0].get(field)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value.isascii() or not value.isdecimal() or len(value) > 16:
+                return None
+            value = int(value)
+        return value if type(value) is int and 0 < value < 2**52 else None
+
     def compute_permissions(
         self,
         uid: int,
@@ -116,13 +132,28 @@ class OdooService:
         google_status: str = "disconnected",
         google_scopes: list[str] | None = None,
     ) -> list[str]:
-        """Tính toán danh sách 9 quyền hạn chuẩn hóa dựa trên trạng thái thực tế."""
+        """Tính toán danh sách quyền hạn chuẩn hóa dựa trên trạng thái thực tế."""
         perms: set[str] = set()
 
         # 1. Công việc cá nhân (tasks): cấp cho người dùng Odoo nội bộ đang hoạt động
         if is_internal_user:
             perms.add("tasks.read")
             perms.add("tasks.write")
+
+        if secret and is_internal_user:
+            try:
+                if self.client.execute(
+                    uid=uid, secret=secret, model="res.users", method="has_group",
+                    args=["base.group_user"],
+                ):
+                    perms.add("knowledge.read")
+                    if self.client.execute(
+                        uid=uid, secret=secret, model="res.users", method="has_group",
+                        args=["base.group_system"],
+                    ):
+                        perms.add("knowledge.write")
+            except Exception:
+                pass
 
         # 2. CRM: xác định quyền model thực tế trên crm.lead, cô lập từng thao tác
         if secret:
@@ -140,6 +171,17 @@ class OdooService:
                 except Exception:
                     # Lỗi kiểm tra một quyền không giữ lại kết quả chưa xác minh đầy đủ
                     pass
+
+        # Sales creation requires both the document and its lines to be creatable.
+        if secret and is_internal_user:
+            try:
+                if all(self.client.execute(
+                    uid=uid, secret=secret, model=model,
+                    method="check_access_rights", args=["create", False],
+                ) for model in ("sale.order", "sale.order.line")):
+                    perms.add("sales.create")
+            except Exception:
+                pass
 
         # 3. Google: quyền phụ thuộc trạng thái kết nối và scopes chính xác
         if google_status == "connected" and google_scopes:
@@ -185,6 +227,9 @@ class OdooService:
             if has_gmail_send:
                 perms.add("gmail.send")
 
+        if google_status == "connected":
+            from app.workspace.catalog import permissions_for
+            perms.update(permissions_for(google_scopes or []))
         return sorted(perms)
 
     def create_lead(
@@ -341,6 +386,7 @@ class OdooService:
         limit: int | None = None,
         offset: int | None = None,
         order: str | None = None,
+        count_only: bool = False,
     ) -> dict[str, Any]:
         """Thực hiện truy vấn đọc an toàn qua Whitelist Catalog bằng credential của chính người dùng.
 
@@ -357,6 +403,27 @@ class OdooService:
             order=order,
         )
 
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if count_only:
+            count_res = self.client.execute(
+                uid=uid,
+                secret=secret,
+                model=val_model,
+                method="search_count",
+                args=[val_domain],
+            )
+            total_count = count_res if isinstance(count_res, int) else 0
+            return {
+                "items": [],
+                "count": 0,
+                "total_count": total_count,
+                "limit": val_limit,
+                "offset": val_offset,
+                "model": val_model,
+            }
+
         records = self.client.execute(
             uid=uid,
             secret=secret,
@@ -372,9 +439,27 @@ class OdooService:
         )
 
         items = records if isinstance(records, list) else []
+
+        if len(items) < val_limit and val_offset == 0:
+            total_count = len(items)
+        else:
+            try:
+                c = self.client.execute(
+                    uid=uid,
+                    secret=secret,
+                    model=val_model,
+                    method="search_count",
+                    args=[val_domain],
+                )
+                total_count = c if isinstance(c, int) else len(items)
+            except Exception as e:
+                logger.warning("Failed to search_count for %s: %s", val_model, e)
+                total_count = len(items)
+
         return {
             "items": items,
             "count": len(items),
+            "total_count": total_count,
             "limit": val_limit,
             "offset": val_offset,
             "model": val_model,

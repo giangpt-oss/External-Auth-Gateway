@@ -3,6 +3,8 @@ import xmlrpc.client
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+
 
 class OdooError(Exception):
     """Base exception for Odoo errors."""
@@ -62,6 +64,31 @@ class OdooClient:
             self.url = url.rstrip("/")
         self.db = db
         self.timeout = timeout
+
+    def studio_approval_spec(self, uid, secret, record_id, method, company_id):
+        """Studio returns integer map keys, unsupported by XML-RPC serialization."""
+        if method not in ('action_confirm', 'action_quotation_send'):
+            raise OdooError('Unsupported quotation approval method.')
+        try:
+            response = httpx.post(self.url + '/jsonrpc', json={
+                'jsonrpc': '2.0', 'method': 'call', 'id': 1,
+                'params': {'service': 'object', 'method': 'execute_kw', 'args': [
+                    self.db, uid, secret, 'studio.approval.rule', 'get_approval_spec',
+                    [[{'model': 'sale.order', 'method': method, 'action_id': False, 'res_id': record_id}]],
+                    {'context': {'allowed_company_ids': [company_id], 'force_company': company_id}}]}},
+                timeout=self.timeout)
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise OdooNetworkError('Không đọc được trạng thái phê duyệt từ Odoo.') from exc
+        if body.get('error'):
+            name = body['error'].get('data', {}).get('name', '')
+            if name.endswith(('AccessError', 'AccessDenied')):
+                raise OdooAccessError('Không có quyền đọc quy tắc phê duyệt Odoo.')
+            raise OdooError('Odoo không cung cấp cấu trúc phê duyệt Studio được hỗ trợ.')
+        if not isinstance(body.get('result'), dict):
+            raise OdooError('Dữ liệu phê duyệt Studio không hợp lệ.')
+        return body['result']
 
     def _get_proxy(self, service: str) -> xmlrpc.client.ServerProxy:
         endpoint = f"{self.url}/xmlrpc/2/{service}"

@@ -10,9 +10,11 @@ from app.config import Settings
 from app.models import TelegramConnection
 from app.telegram.client import TelegramClient
 from app.telegram.service import TelegramService
+from app.telegram.web_verification import router as web_verification_router
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Telegram Bot"])
+router.include_router(web_verification_router)
 
 
 def get_telegram_client(request: Request) -> TelegramClient:
@@ -39,9 +41,12 @@ def get_telegram_service(
 
 @router.post("/connections/telegram/link")
 def create_telegram_link(
+    request: Request,
     current_user: AuthenticatedUser = Depends(get_current_user),
     telegram_service: TelegramService = Depends(get_telegram_service),
 ):
+    if request.app.state.settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD:
+        raise HTTPException(409, "Vui lòng xác minh Telegram trên portal.")
     link = telegram_service.issue_link(user_id=current_user.id)
     return {
         "status": "success",

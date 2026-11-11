@@ -120,3 +120,22 @@ def test_startup_recovery_quarantines_legacy_commands(test_setup):
 
     # AI worker should not process this
     assert worker.process_pending_once() == 0
+
+
+def test_action_status_with_id_is_forwarded_to_agent(test_setup):
+    Session, service, _, _ = test_setup
+    service._handle_status = MagicMock()
+    service.ingest_update({"update_id": 1004, "message": {"chat": {"id": 7, "type": "private"}, "from": {"id": 7}, "text": "/status c_12345678"}})
+    service._handle_status.assert_not_called()
+    with Session() as db:
+        assert db.query(TelegramUpdate).filter_by(update_id=1004).one().status == "pending"
+
+
+def test_recovery_does_not_quarantine_action_status(test_setup):
+    Session, _, worker, _ = test_setup
+    with Session() as db:
+        db.add(TelegramUpdate(update_id=1005, status="pending", payload=json.dumps({"message": {"chat": {"id": 7, "type": "private"}, "from": {"id": 7}, "text": "/status c_12345678"}})))
+        db.commit()
+    worker.recover_on_startup()
+    with Session() as db:
+        assert db.query(TelegramUpdate).filter_by(update_id=1005).one().status == "pending"

@@ -12,7 +12,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
 from app.models import TelegramConnection, TelegramUpdate, User
-from app.telegram.client import TelegramClient, TelegramDeliveryUnknownError
+from app.telegram.client import (
+    TelegramClient,
+    TelegramDeliveryUnknownError,
+    normalize_agent_response,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -63,7 +67,7 @@ class TelegramAIWorker:
                         tokens = txt.split()
                         base_cmd = tokens[0].lower().split("@")[0]
                         is_gw = False
-                        if base_cmd in {"/start", "/help", "/status"}:
+                        if base_cmd in {"/start", "/help"} or (base_cmd == "/status" and len(tokens) == 1):
                             is_gw = True
                         elif base_cmd == "/crm":
                             sub_cmd = tokens[1].lower() if len(tokens) > 1 else ""
@@ -357,7 +361,8 @@ class TelegramAIWorker:
             return res.rowcount
 
     def _verify_recipient(
-        self, bound_user_id: int, telegram_user_id: int, chat_id: int
+        self, bound_user_id: int, telegram_user_id: int, chat_id: int,
+        expected_binding_id: str | None = None,
     ) -> tuple[bool, str | None]:
         with self.session_factory() as db:
             conn = (
@@ -374,6 +379,8 @@ class TelegramAIWorker:
                     False,
                     "Telegram connection disconnected or recipient rebound before delivery",
                 )
+            if expected_binding_id is not None and conn.binding_id != expected_binding_id:
+                return False, "Telegram binding changed before document delivery"
 
             user = db.query(User).filter_by(id=bound_user_id, active=True).first()
             if not user:
@@ -638,7 +645,7 @@ class TelegramAIWorker:
                 )
                 return False
 
-        # Call AI Agent (Timeout 25s)
+        # Call AI Agent (Timeout 35s)
         ai_url = f"{self.settings.AI_AGENT_BASE_URL.rstrip('/')}/internal/v1/telegram/turn"
         request_id = f"tg-{update_id}"
         req_payload = {
@@ -663,7 +670,8 @@ class TelegramAIWorker:
                 "Authorization": f"Bearer {self.settings.GATEWAY_TO_AGENT_SECRET}",
                 "Content-Type": "application/json",
             }
-            resp = httpx.post(ai_url, json=req_payload, headers=headers, timeout=25.0)
+            resp = httpx.post(ai_url, json=req_payload, headers=headers,
+                              timeout=75.0 if getattr(self.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False) else 35.0)
             t_ai = time.time() - t_ai_start
             _logger.info("TIMING_AI: request_id=%s duration=%.3fs status=%s", request_id, t_ai, resp.status_code)
 
@@ -686,16 +694,21 @@ class TelegramAIWorker:
                     )
                     return True
 
-                messages = resp_data.get("messages")
-                if not isinstance(messages, list) or not all(isinstance(m, str) for m in messages):
+                try:
+                    delivery = normalize_agent_response(resp_data)
+                except ValueError as exc:
                     self._mark_failed(
                         update_db_id,
-                        "AI Agent response 'messages' must be a list of strings",
+                        str(exc),
                         claim_token=claim_token,
                     )
                     return True
 
-                ai_response_str = json.dumps(messages, ensure_ascii=False)
+                if delivery["attachments"]:
+                    delivery["telegram_binding_id"] = current_binding_id
+                    ai_response_str = json.dumps(delivery, ensure_ascii=False)
+                else:
+                    ai_response_str = json.dumps(delivery["messages"], ensure_ascii=False)
                 # Save response
                 if not self._save_ai_response(update_db_id, claim_token, ai_response_str):
                     _logger.warning(
@@ -814,16 +827,25 @@ class TelegramAIWorker:
             )
             return False
 
+        try:
+            stored_response = json.loads(ai_response_str)
+            delivery = normalize_agent_response(stored_response)
+        except (ValueError, TypeError):
+            self._mark_failed(update_db_id, "Invalid persisted AI delivery response", claim_token=claim_token)
+            return True
+        expected_binding_id = (
+            stored_response.get("telegram_binding_id") if isinstance(stored_response, dict) else None
+        )
+        if delivery["attachments"] and not expected_binding_id:
+            self._mark_delivery_failed(update_db_id, claim_token, "Document delivery lacks original binding")
+            return True
+
         # Prepare chunks if not already prepared
         if not delivery_chunks_str:
-            try:
-                messages = json.loads(ai_response_str)
-            except Exception:
-                messages = [ai_response_str]
-
             all_chunks = []
-            for msg in messages:
+            for msg in delivery["messages"]:
                 all_chunks.extend(self._split_text(msg, max_length=4000))
+            all_chunks.extend({"type": "document", **item} for item in delivery["attachments"])
 
             delivery_chunks_str = json.dumps(all_chunks, ensure_ascii=False)
             delivery_index = 0
@@ -842,7 +864,12 @@ class TelegramAIWorker:
         total_chunks = len(all_chunks)
         for idx in range(delivery_index, total_chunks):
             # Re-verify recipient before each chunk
-            is_valid, err_msg = self._verify_recipient(bound_user_id, telegram_user_id, chat_id)
+            if expected_binding_id:
+                is_valid, err_msg = self._verify_recipient(
+                    bound_user_id, telegram_user_id, chat_id, expected_binding_id
+                )
+            else:
+                is_valid, err_msg = self._verify_recipient(bound_user_id, telegram_user_id, chat_id)
             if not is_valid:
                 _logger.warning(
                     "Recipient verification failed before sending chunk %s for update %s: %s",
@@ -859,14 +886,42 @@ class TelegramAIWorker:
 
             chunk = all_chunks[idx]
 
+            artifact = None
+            if isinstance(chunk, dict):
+                try:
+                    if chunk.get("type") != "document" or not expected_binding_id:
+                        raise ValueError("Invalid document delivery chunk")
+                    from app.reporting.artifacts import load_artifact, revalidate_for_delivery
+
+                    revalidate_for_delivery(
+                        self.settings, self.session_factory, bound_user_id, telegram_user_id,
+                        chat_id, expected_binding_id, artifact_id=chunk["artifact_id"],
+                    )
+                    artifact = load_artifact(
+                        self.session_factory, bound_user_id, chunk["artifact_id"], expected_binding_id
+                    )
+                    valid, error = self._verify_recipient(
+                        bound_user_id, telegram_user_id, chat_id, expected_binding_id
+                    )
+                    if not valid:
+                        raise ValueError(error)
+                except Exception as exc:
+                    self._mark_delivery_failed(update_db_id, claim_token, f"Artifact unavailable: {type(exc).__name__}")
+                    return True
+
             # Mark sending immediately before each Telegram API call
             if not self._set_delivery_status(update_db_id, claim_token, "sending"):
                 _logger.warning("Claim lost before sending chunk %s for update %s", idx, update_id)
                 return False
 
             try:
-                # Plain text strictly per contract
-                self.telegram_client.send_message(chat_id, chunk, parse_mode="")
+                if artifact is not None:
+                    self.telegram_client.send_document(
+                        chat_id, artifact["filename"], artifact["content"],
+                        content_type=artifact["content_type"],
+                    )
+                else:
+                    self.telegram_client.send_message(chat_id, chunk, parse_mode="")
             except (TelegramDeliveryUnknownError, httpx.TimeoutException, httpx.NetworkError) as e:
                 _logger.error(
                     "Delivery unknown on chunk %s/%s for update %s (req_id tg-%s): %s",

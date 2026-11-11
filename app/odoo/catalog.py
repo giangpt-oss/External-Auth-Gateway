@@ -75,6 +75,7 @@ ODOO_CATALOG: dict[str, OdooModelConfig] = {
             "city",
             "country_id",
             "parent_id",
+            "user_id",
             "active",
         ],
         default_fields=["id", "name", "email", "phone", "is_company", "city"],

@@ -3,170 +3,436 @@
 {% block title %}Bảng điều khiển — External Auth Gateway{% endblock %}
 
 {% block content %}
-<div style="margin-bottom: 1.5rem;">
-  <h1 style="font-size: 1.5rem; font-weight: 700;">Bảng điều khiển cá nhân</h1>
-  <p style="font-size: 0.875rem; color: var(--text-muted);">
-    Quản lý liên kết tài khoản Odoo với Google Workspace và Telegram
+<div class="page-header">
+  <h1 class="page-title">Bảng điều khiển cá nhân</h1>
+  <p class="page-description">
+    Quản lý liên kết tài khoản Odoo với Google Workspace và trợ lý Telegram cá nhân
   </p>
 </div>
 
+<!-- Hệ thống thông báo trạng thái -->
 {% if request.query_params.get('error') %}
-<div class="alert alert-danger" style="margin-bottom: 1rem;">
-  ⚠️ <strong>Lỗi kết nối:</strong> {{ request.query_params.get('error') }}
-</div>
-{% endif %}
-{% if request.query_params.get('status') == 'google_connected' %}
-<div class="alert alert-success" style="margin-bottom: 1rem; background: #e6f4ea; color: var(--success); border: 1px solid #ceead6;">
-  ✅ <strong>Kết nối Google Workspace thành công!</strong> Lịch Google của bạn đã được liên kết với Odoo.
-</div>
-{% endif %}
-{% if request.query_params.get('status') == 'sync_success' %}
-<div class="alert alert-success" style="margin-bottom: 1rem; background: #e6f4ea; color: var(--success); border: 1px solid #ceead6;">
-  ✅ <strong>{{ request.query_params.get('msg') or 'Đã đồng bộ lịch thành công!' }}</strong>
-</div>
-{% endif %}
-
-<div class="alert alert-info">
-  ℹ️ <strong>Lưu ý về phiên làm việc:</strong> Việc đăng xuất khỏi giao diện web này chỉ kết thúc phiên làm việc trên trình duyệt. Các tác vụ tự động (đồng bộ lịch, nhắc lịch họp Telegram) vẫn tiếp tục hoạt động ngầm. Để dừng hẳn, hãy bấm "Tạm dừng" hoặc "Ngắt kết nối" từng dịch vụ bên dưới.
-</div>
-
-<!-- 1. THÔNG TIN ODOO -->
-<div class="card">
-  <div class="card-title">
-    <span>Tài khoản Odoo</span>
-    <span class="badge badge-success">Đã xác thực</span>
+<div class="alert alert-danger" role="alert">
+  <svg class="alert-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="10"></circle>
+    <line x1="12" y1="8" x2="12" y2="12"></line>
+    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+  </svg>
+  <div class="alert-content">
+    <strong>Lỗi kết nối:</strong> {{ request.query_params.get('error') }}
   </div>
-  <div class="table-responsive">
-    <table>
-      <tbody>
-        <tr>
-          <td style="width: 25%; font-weight: 500;">Họ và tên:</td>
-          <td><strong>{{ user.name }}</strong></td>
-          <td style="width: 25%; font-weight: 500;">Múi giờ:</td>
-          <td>{{ user.tz or 'Asia/Bangkok' }}</td>
-        </tr>
-        <tr>
-          <td style="font-weight: 500;">Email đăng nhập:</td>
-          <td>{{ user.login }}</td>
-          <td style="font-weight: 500;">Odoo Tenant:</td>
-          <td><code>{{ user.tenant }}</code> (UID: {{ user.odoo_uid }})</td>
-        </tr>
-      </tbody>
-    </table>
+</div>
+{% endif %}
+
+{% if request.query_params.get('status') == 'google_connected' %}
+<div class="alert alert-success" role="status">
+  <svg class="alert-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+    <polyline points="22 4 12 14.01 9 11.01"></polyline>
+  </svg>
+  <div class="alert-content">
+    <strong>Kết nối Google Workspace thành công!</strong> Lịch và các quyền ứng dụng Google của bạn đã được liên kết với Odoo.
+  </div>
+</div>
+{% endif %}
+
+{% if telegram_verified and request.query_params.get('status') == 'telegram_verified' %}
+<div class="alert alert-success" role="status">
+  <svg class="alert-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+    <polyline points="22 4 12 14.01 9 11.01"></polyline>
+  </svg>
+  <div class="alert-content">
+    <strong>Xác minh hoàn tất!</strong> Tài khoản Telegram đã được xác nhận trùng khớp với hồ sơ nhân viên Odoo.
+  </div>
+</div>
+{% endif %}
+
+{% if request.query_params.get('status') == 'sync_success' %}
+<div class="alert alert-success" role="status">
+  <svg class="alert-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+    <polyline points="22 4 12 14.01 9 11.01"></polyline>
+  </svg>
+  <div class="alert-content">
+    {{ request.query_params.get('msg') or 'Đã đồng bộ lịch thành công!' }}
+  </div>
+</div>
+{% endif %}
+
+<!-- 1. THÔNG TIN NHÂN VIÊN ODOO -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title-group">
+      <div class="card-title-icon" style="background-color: #f3f0ff; border-color: #e9d5ff; color: #7e22ce;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+          <circle cx="12" cy="7" r="4"></circle>
+        </svg>
+      </div>
+      <div>
+        <h2 class="card-title">Tài khoản Odoo</h2>
+        <p class="card-subtitle">Hồ sơ nhân viên và môi trường doanh nghiệp đã xác thực</p>
+      </div>
+    </div>
+    <span class="badge badge-success">
+      <span class="badge-dot"></span>
+      Đã xác thực
+    </span>
+  </div>
+
+  <div class="profile-card">
+    <div class="profile-avatar-large">
+      {{ (user.name or 'U')[:1] | upper }}
+    </div>
+    <div class="profile-details">
+      <div class="profile-field">
+        <span class="profile-field-label">Họ và tên</span>
+        <span class="profile-field-value">{{ user.name }}</span>
+      </div>
+      <div class="profile-field">
+        <span class="profile-field-label">Email Odoo</span>
+        <span class="profile-field-value">{{ user.login }}</span>
+      </div>
+      <div class="profile-field">
+        <span class="profile-field-label">Múi giờ</span>
+        <span class="profile-field-value">{{ user.tz or 'Asia/Bangkok' }}</span>
+      </div>
+      <div class="profile-field">
+        <span class="profile-field-label">Odoo Tenant & UID</span>
+        <span class="profile-field-value">
+          <code style="font-family: var(--font-mono); font-size: 0.8125rem; background: var(--bg-surface-subtle); padding: 0.15rem 0.4rem; border-radius: var(--radius-xs);">{{ user.tenant }}</code>
+          <span style="color: var(--text-muted); font-size: 0.8rem;">(UID: {{ user.odoo_uid }})</span>
+        </span>
+      </div>
+    </div>
   </div>
 </div>
 
 <div class="grid grid-2">
   <!-- 2. GOOGLE WORKSPACE -->
   <div class="card">
-    <div class="card-title">
-      <span>Google Workspace</span>
-      {% if google_conn and google_conn.status == 'connected' %}
-        <span class="badge badge-success">Đã kết nối</span>
-      {% elif google_conn and google_conn.status == 'reconnect_required' %}
-        <span class="badge badge-warning">Cần kết nối lại</span>
-      {% else %}
-        <span class="badge badge-secondary">Chưa kết nối</span>
-      {% endif %}
+    <div class="card-header">
+      <div class="card-title-group">
+        <div class="card-title-icon" style="background-color: #fff; border-color: var(--border-subtle);">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+            <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+            <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05"/>
+            <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="card-title">Google Workspace</h2>
+          <p class="card-subtitle">Đồng bộ lịch, email và tài liệu làm việc</p>
+        </div>
+      </div>
+      <div>
+        {% if google_conn and google_conn.status == 'connected' %}
+          <span class="badge badge-success">
+            <span class="badge-dot"></span>
+            Đã kết nối
+          </span>
+        {% else %}
+          <span class="badge badge-secondary">
+            <span class="badge-dot"></span>
+            Chưa kết nối
+          </span>
+        {% endif %}
+      </div>
     </div>
 
-    {% if google_conn and google_conn.status == 'connected' %}
-      <p style="font-size: 0.875rem; margin-bottom: 0.5rem;">
-        Email liên kết: <strong>{{ google_conn.email }}</strong>
-      </p>
-      <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
-        Quyền đã cấp: <code>{{ google_conn.scopes or 'calendar.events' }}</code>
-      </p>
-      <form action="/connections/google/disconnect" method="POST" onsubmit="return confirm('Bạn có chắc muốn ngắt kết nối Google Calendar? Các lịch đã tạo sẽ không bị xóa.');">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-danger">Ngắt kết nối Google</button>
-      </form>
-    {% else %}
-      <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
-        Kết nối tài khoản Google Workspace (chỉ hỗ trợ miền công ty) để tự động đồng bộ lịch hẹn với Odoo.
-      </p>
-      <form action="/connections/google/start" method="POST">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-primary">Kết nối Google Workspace</button>
-      </form>
-    {% endif %}
+    <!-- Thông tin tài khoản Google -->
+    <div class="service-meta-box">
+      <div class="service-meta-row">
+        <span class="service-meta-label">Tài khoản liên kết</span>
+        <span class="service-meta-value">
+          {% if google_conn and google_conn.status == 'connected' %}
+            {{ google_conn.google_email or google_conn.google_user_id or 'Đã kết nối thành công' }}
+          {% else %}
+            <span style="color: var(--text-muted); font-weight: normal;">Chưa có tài khoản</span>
+          {% endif %}
+        </span>
+      </div>
+      <div class="service-meta-row">
+        <span class="service-meta-label">Phạm vi đồng bộ</span>
+        <span class="service-meta-value">
+          {% if google_conn and google_conn.status == 'connected' %}
+            Lịch, Email, Drive & Docs
+          {% else %}
+            Chưa cấp quyền
+          {% endif %}
+        </span>
+      </div>
+    </div>
+
+    <!-- Danh sách ứng dụng con (Apps) -->
+    <div style="margin-top: 1rem;">
+      <span style="font-size: 0.78125rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);">
+        Ứng dụng được cấp quyền
+      </span>
+      <div class="app-status-grid">
+        {% for app in workspace_apps %}
+        <div class="app-status-tile">
+          <div class="app-status-left">
+            <div style="flex-shrink: 0; display: flex; align-items: center;">{{ app.icon_svg|safe }}</div>
+            <span class="app-status-name">{{ app.name }}</span>
+          </div>
+          {% if app.active %}
+            <span class="badge badge-success app-status-badge">Bật</span>
+          {% else %}
+            <span class="badge badge-secondary app-status-badge">Tắt</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Nút hành động cho Google Workspace -->
+    <div class="service-action-row" style="margin-top: 1.25rem;">
+      {% if google_conn and google_conn.status == 'connected' %}
+        <form action="/connections/google/disconnect" method="POST" onsubmit="return confirm('Bạn có chắc muốn ngắt kết nối Google Workspace?');" style="margin: 0; width: 100%;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn btn-danger btn-block btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+            Ngắt kết nối Google
+          </button>
+        </form>
+      {% else %}
+        <form action="/connections/google/start" method="POST" style="margin: 0; width: 100%;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn btn-primary btn-block">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+              <polyline points="10 17 15 12 10 7"></polyline>
+              <line x1="15" y1="12" x2="3" y2="12"></line>
+            </svg>
+            Kết nối tài khoản Google
+          </button>
+        </form>
+      {% endif %}
+    </div>
   </div>
 
   <!-- 3. TELEGRAM BOT -->
   <div class="card">
-    <div class="card-title">
-      <span>Telegram Bot</span>
-      {% if telegram_conn and telegram_conn.status == 'connected' %}
-        <span class="badge badge-success">Đã kết nối</span>
-      {% elif telegram_conn and telegram_conn.status == 'blocked' %}
-        <span class="badge badge-danger">Đã chặn Bot</span>
-      {% else %}
-        <span class="badge badge-secondary">Chưa kết nối</span>
-      {% endif %}
+    <div class="card-header">
+      <div class="card-title-group">
+        <div class="card-title-icon" style="background-color: #f0f8ff; border-color: #d0e7ff; color: #0088cc;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .37z" fill="#0088cc"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="card-title">Telegram Bot</h2>
+          <p class="card-subtitle">Nhận thông báo, nhắc lịch và giao việc qua bot AI</p>
+        </div>
+      </div>
+      <div>
+        {% if telegram_state == 'verified' %}
+          <span class="badge badge-success">
+            <span class="badge-dot"></span>
+            Đã xác thực
+          </span>
+        {% elif telegram_state == 'mismatch' %}
+          <span class="badge badge-danger">
+            <span class="badge-dot"></span>
+            Telegram ID trên Odoo đã thay đổi
+          </span>
+        {% elif telegram_state == 'unavailable' %}
+          <span class="badge badge-secondary">
+            <span class="badge-dot"></span>
+            Chưa kiểm tra được ID trên Odoo
+          </span>
+        {% elif telegram_conn and telegram_conn.status == 'connected' %}
+          <span class="badge badge-success">
+            <span class="badge-dot"></span>
+            Đã kết nối
+          </span>
+        {% elif telegram_conn and telegram_conn.status == 'blocked' %}
+          <span class="badge badge-danger">
+            <span class="badge-dot"></span>
+            Đã chặn Bot
+          </span>
+        {% else %}
+          <span class="badge badge-secondary">
+            <span class="badge-dot"></span>
+            Chưa kết nối
+          </span>
+        {% endif %}
+      </div>
     </div>
 
-    {% if telegram_conn and telegram_conn.status == 'connected' %}
-      <p style="font-size: 0.875rem; margin-bottom: 0.5rem;">
-        Chat ID: <strong>{{ telegram_conn.private_chat_id }}</strong>
-        {% if telegram_conn.username %}
-          (@{{ telegram_conn.username }})
-        {% endif %}
-      </p>
-      <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
-        Bạn có thể tra cứu CRM với lệnh <code>/crm</code> và nhận nhắc lịch họp trước 15 phút.
-      </p>
-      <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-        <form action="/connections/telegram/test" method="POST">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="btn btn-secondary">Gửi tin nhắn thử</button>
-        </form>
-        <form action="/connections/telegram/disconnect" method="POST" onsubmit="return confirm('Bạn có chắc chắn muốn ngắt kết nối Telegram? Bạn sẽ không còn nhận được thông báo nhắc họp.');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="btn btn-danger">Ngắt kết nối</button>
-        </form>
+    <!-- Thông tin kết nối Telegram -->
+    <div class="service-meta-box">
+      <div class="service-meta-row">
+        <span class="service-meta-label">Tài khoản Telegram</span>
+        <span class="service-meta-value">
+          {% if telegram_conn and telegram_conn.username %}
+            @{{ telegram_conn.username }}
+          {% elif telegram_conn and telegram_conn.telegram_user_id %}
+            ID: {{ telegram_conn.telegram_user_id }}
+          {% else %}
+            <span style="color: var(--text-muted); font-weight: normal;">Chưa liên kết</span>
+          {% endif %}
+        </span>
       </div>
-    {% else %}
-      <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
-        Liên kết Telegram riêng tư để nhận thông báo nhắc họp trước 15 phút và tra cứu CRM cá nhân.
-      </p>
-      <button id="btn-link-telegram" type="button" class="btn btn-primary">Tạo mã QR / Link</button>
-      <div id="telegram-link-box" style="display: none;"></div>
-    {% endif %}
+      <div class="service-meta-row">
+        <span class="service-meta-label">Đối soát hồ sơ Odoo</span>
+        <span class="service-meta-value">
+          {% if telegram_state == 'verified' %}
+            <span style="color: var(--success);">✓ Trùng khớp hồ sơ</span>
+          {% elif telegram_state == 'mismatch' %}
+            <span style="color: var(--danger);">⚠ Sai lệch với hồ sơ Odoo</span>
+          {% else %}
+            <span style="color: var(--text-muted);">Cần xác minh</span>
+          {% endif %}
+        </span>
+      </div>
+    </div>
+
+    <!-- Khu vực hành động và xác minh Telegram -->
+    <div>
+      {% if telegram_bot_url %}
+        <div style="margin-bottom: 0.75rem;">
+          <a href="{{ telegram_bot_url }}" class="btn btn-primary btn-block" target="_blank" rel="noopener noreferrer">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+            Mở Telegram Bot
+          </a>
+        </div>
+      {% endif %}
+
+      <!-- Khi chưa xác minh web: hiển thị nút Xác minh Telegram rõ ràng -->
+      {% if telegram_web_enabled and not telegram_verified %}
+        <details id="telegram-verification-options" class="telegram-verification"
+          data-telegram-state="{{ telegram_state }}"
+          data-telegram-revision="{{ telegram_conn.updated_at.isoformat() if telegram_conn and telegram_conn.updated_at else '' }}">
+          <summary id="btn-verify-telegram" class="btn btn-primary btn-block">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            Xác minh Telegram
+          </summary>
+          <div class="telegram-verification-list">
+            {% include "telegram_verification_options.html" %}
+            <p id="telegram-verification-progress" class="help-text" role="status" hidden></p>
+          </div>
+        </details>
+      {% elif telegram_web_enabled and telegram_verified %}
+        <details id="telegram-verification-options" class="telegram-verification"
+          data-telegram-state="{{ telegram_state }}"
+          data-telegram-revision="{{ telegram_conn.updated_at.isoformat() if telegram_conn and telegram_conn.updated_at else '' }}">
+          <summary id="btn-verify-telegram" class="btn btn-secondary btn-sm" style="width: auto;">
+            Xác minh lại tài khoản
+          </summary>
+          <div class="telegram-verification-list">
+            {% include "telegram_verification_options.html" %}
+            <p id="telegram-verification-progress" class="help-text" role="status" hidden></p>
+          </div>
+        </details>
+      {% endif %}
+
+      <!-- Thao tác phụ (Thử nghiệm tin nhắn & Ngắt kết nối) -->
+      {% if telegram_conn and telegram_conn.status == 'connected' %}
+        <div class="service-action-row" style="margin-top: 0.75rem;">
+          <form action="/connections/telegram/test" method="POST" style="margin: 0; flex: 1;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-secondary btn-block btn-sm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+              Gửi tin nhắn thử
+            </button>
+          </form>
+          <form action="/connections/telegram/disconnect" method="POST" onsubmit="return confirm('Bạn có chắc chắn muốn ngắt kết nối Telegram?');" style="margin: 0; flex: 1;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-danger btn-block btn-sm">
+              Ngắt kết nối
+            </button>
+          </form>
+        </div>
+      {% elif not telegram_web_enabled %}
+        <div style="margin-top: 0.75rem;">
+          <button id="btn-link-telegram" type="button" class="btn btn-primary btn-block">
+            Tạo mã QR / Link liên kết
+          </button>
+          <div id="telegram-link-box" style="display: none; margin-top: 1rem;"></div>
+        </div>
+      {% endif %}
+    </div>
   </div>
 </div>
 
-<!-- 4. ĐỒNG BỘ LỊCH -->
+<!-- 4. ĐỒNG BỘ LỊCH GOOGLE & ODOO -->
 <div class="card">
-  <div class="card-title">
-    <span>Đồng bộ Lịch Google & Odoo</span>
-    {% if calendar_active %}
-      <span class="badge badge-success">Đang hoạt động</span>
-    {% else %}
-      <span class="badge badge-secondary">Đang tạm dừng</span>
-    {% endif %}
+  <div class="card-header">
+    <div class="card-title-group">
+      <div class="card-title-icon" style="background-color: var(--primary-50); border-color: var(--primary-200); color: var(--primary);">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"></polyline>
+          <polyline points="1 20 1 14 7 14"></polyline>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+        </svg>
+      </div>
+      <div>
+        <h2 class="card-title">Đồng bộ Lịch</h2>
+        <p class="card-subtitle">Hai chiều tự động giữa Google Calendar và Odoo Enterprise</p>
+      </div>
+    </div>
+    <div>
+      {% if calendar_active %}
+        <span class="badge badge-success">
+          <span class="badge-dot"></span>
+          Đang hoạt động
+        </span>
+      {% else %}
+        <span class="badge badge-secondary">
+          <span class="badge-dot"></span>
+          Đang tạm dừng
+        </span>
+      {% endif %}
+    </div>
   </div>
 
-  <div style="font-size: 0.875rem; margin-bottom: 1rem;">
-    <p>Phạm vi đồng bộ tự động: Từ <strong>35 ngày trước</strong> đến <strong>90 ngày sau</strong> (bao gồm lịch cá nhân và các cuộc họp bạn được mời tham gia).</p>
-    <p class="help-text" style="margin-top: 0.25rem;">
-      * Hệ thống tự động đồng bộ ngầm định kỳ mỗi 2 phút. Bạn cũng có thể bấm "Đồng bộ ngay" bất cứ lúc nào.
+  <div style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1.25rem;">
+    <p>
+      Hệ thống tự động đồng bộ sự kiện lịch từ <strong>35 ngày trước</strong> đến <strong>90 ngày sau</strong> (bao gồm lịch họp cá nhân và lịch bạn được mời tham gia).
+    </p>
+    <p class="help-text" style="margin-top: 0.35rem;">
+      * Tiến trình đồng bộ ngầm định kỳ mỗi 2 phút. Bạn có thể bấm "Đồng bộ ngay" để cập nhật tức thì.
     </p>
   </div>
 
-  <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-    <form action="/calendar/sync" method="POST">
+  <div style="display: flex; gap: 0.75rem; flex-wrap: wrap;">
+    <form action="/calendar/sync" method="POST" style="margin: 0;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="btn btn-primary">🔄 Đồng bộ ngay</button>
+      <button type="submit" class="btn btn-primary">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="23 4 23 10 17 10"></polyline>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+        </svg>
+        Đồng bộ ngay
+      </button>
     </form>
     {% if calendar_active %}
-      <form action="/calendar/pause" method="POST">
+      <form action="/calendar/pause" method="POST" style="margin: 0;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-secondary">Tạm dừng tự động</button>
+        <button type="submit" class="btn btn-secondary">
+          Tạm dừng tự động
+        </button>
       </form>
     {% else %}
-      <form action="/calendar/enable" method="POST">
+      <form action="/calendar/enable" method="POST" style="margin: 0;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-secondary">Bật đồng bộ lịch</button>
+        <button type="submit" class="btn btn-secondary">
+          Bật đồng bộ lịch
+        </button>
       </form>
     {% endif %}
   </div>
@@ -175,39 +441,53 @@
 <!-- 5. XUNG ĐỘT CẦN XỬ LÝ (NẾU CÓ) -->
 {% if conflicts %}
 <div class="card" style="border-left: 4px solid var(--danger);">
-  <div class="card-title" style="color: var(--danger);">
-    <span>⚠️ Xung đột lịch cần xử lý ({{ conflicts|length }})</span>
+  <div class="card-header" style="border-bottom-color: var(--danger-border);">
+    <div class="card-title-group">
+      <div class="card-title-icon" style="background-color: var(--danger-bg); border-color: var(--danger-border); color: var(--danger);">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"></polygon>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+      </div>
+      <div>
+        <h2 class="card-title" style="color: var(--danger);">Xung đột lịch cần xử lý ({{ conflicts|length }})</h2>
+        <p class="card-subtitle">Sự kiện đã bị chỉnh sửa đồng thời ở cả hai nền tảng</p>
+      </div>
+    </div>
   </div>
-  <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
-    Các lịch sau đây đã bị sửa đổi đồng thời ở cả Google Calendar và Odoo. Hãy chọn phiên bản bạn muốn giữ lại:
+
+  <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+    Các lịch sau đây có nội dung khác biệt giữa Google Calendar và Odoo. Hãy chọn phiên bản bạn muốn giữ lại làm chuẩn:
   </p>
+
   <div class="table-responsive">
-    <table>
+    <table class="data-table">
       <thead>
         <tr>
-          <th>ID Cặp</th>
-          <th>Odoo Event ID</th>
-          <th>Google Event ID</th>
-          <th>Thao tác giải quyết</th>
+          <th style="width: 15%;">Mã cặp</th>
+          <th style="width: 25%;">Odoo Event ID</th>
+          <th style="width: 30%;">Google Event ID</th>
+          <th style="width: 30%;">Lựa chọn giải quyết</th>
         </tr>
       </thead>
       <tbody>
         {% for c in conflicts %}
         <tr>
-          <td>#{{ c.id }}</td>
+          <td><strong>#{{ c.id }}</strong></td>
           <td>{{ c.odoo_event_id }}</td>
-          <td><code>{{ c.google_event_id }}</code></td>
+          <td><code style="font-family: var(--font-mono); font-size: 0.8125rem;">{{ c.google_event_id }}</code></td>
           <td>
-            <div style="display: flex; gap: 0.5rem;">
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
               <form action="/calendar/pairs/{{ c.id }}/resolve" method="POST" style="margin: 0;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="source" value="odoo">
-                <button type="submit" class="btn btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">Giữ bản Odoo</button>
+                <button type="submit" class="btn btn-secondary btn-sm">Giữ bản Odoo</button>
               </form>
               <form action="/calendar/pairs/{{ c.id }}/resolve" method="POST" style="margin: 0;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="source" value="google">
-                <button type="submit" class="btn btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">Giữ bản Google</button>
+                <button type="submit" class="btn btn-secondary btn-sm">Giữ bản Google</button>
               </form>
             </div>
           </td>
@@ -222,32 +502,48 @@
 <!-- 6. LỊCH CHỜ ĐỐI SOÁT (AMBIGUOUS INTENTS) -->
 {% if ambiguous_intents %}
 <div class="card" style="border-left: 4px solid var(--warning);">
-  <div class="card-title" style="color: #b06000;">
-    <span>⏳ Lịch chờ đối soát ({{ ambiguous_intents|length }})</span>
+  <div class="card-header" style="border-bottom-color: var(--warning-border);">
+    <div class="card-title-group">
+      <div class="card-title-icon" style="background-color: var(--warning-bg); border-color: var(--warning-border); color: var(--warning);">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+      </div>
+      <div>
+        <h2 class="card-title" style="color: var(--warning);">Lịch chờ đối soát ({{ ambiguous_intents|length }})</h2>
+        <p class="card-subtitle">Yêu cầu tạo lịch bị gián đoạn mạng trước khi nhận xác nhận</p>
+      </div>
+    </div>
   </div>
-  <p style="font-size: 0.875rem; color: var(--text-muted); margin-bottom: 1rem;">
-    Các yêu cầu tạo lịch gặp sự cố mạng hoặc khởi động lại lúc chưa kịp nhận ID từ Odoo. Vui lòng kiểm tra trên Odoo Calendar:
+
+  <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+    Vui lòng kiểm tra trên Odoo Calendar để gắn mã sự kiện (nếu đã tạo thành công) hoặc yêu cầu thử lại:
   </p>
+
   <div class="table-responsive">
-    <table>
+    <table class="data-table">
       <thead>
         <tr>
-          <th>ID Yêu cầu</th>
-          <th>Nội dung</th>
-          <th>Hành động</th>
+          <th style="width: 15%;">Mã yêu cầu</th>
+          <th style="width: 40%;">Chi tiết luồng</th>
+          <th style="width: 45%;">Hành động đối soát</th>
         </tr>
       </thead>
       <tbody>
         {% for intent in ambiguous_intents %}
         <tr>
-          <td>#{{ intent.id }}</td>
-          <td>Từ <strong>{{ intent.source }}</strong> &rarr; <strong>{{ intent.target }}</strong> (Event ID: <code>{{ intent.source_event_id }}</code>)</td>
+          <td><strong>#{{ intent.id }}</strong></td>
           <td>
-            <form action="/calendar/intents/{{ intent.id }}/reconcile" method="POST" style="display: flex; gap: 0.5rem; align-items: center;">
+            Từ <strong>{{ intent.source }}</strong> &rarr; <strong>{{ intent.target }}</strong><br>
+            <span style="color: var(--text-muted); font-size: 0.78125rem;">(Event ID: <code>{{ intent.source_event_id }}</code>)</span>
+          </td>
+          <td>
+            <form action="/calendar/intents/{{ intent.id }}/reconcile" method="POST" style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="number" name="odoo_event_id" placeholder="Nhập Odoo Event ID (nếu đã tạo)" style="width: 200px; padding: 0.35rem 0.5rem; font-size: 0.8rem;">
-              <button type="submit" name="action" value="link" class="btn btn-primary" style="padding: 0.35rem 0.6rem; font-size: 0.75rem;">Gắn kết nối</button>
-              <button type="submit" name="action" value="retry" class="btn btn-secondary" style="padding: 0.35rem 0.6rem; font-size: 0.75rem;" onclick="return confirm('Bạn chắc chắn sự kiện này chưa hề có trên Odoo?');">Thử tạo lại</button>
+              <input type="number" name="odoo_event_id" placeholder="Mã Odoo Event (nếu có)" style="min-width: 140px; max-width: 180px; padding: 0.35rem 0.5rem; font-size: 0.8125rem;">
+              <button type="submit" name="action" value="link" class="btn btn-primary btn-sm">Gắn kết nối</button>
+              <button type="submit" name="action" value="retry" class="btn btn-secondary btn-sm" onclick="return confirm('Bạn chắc chắn sự kiện này chưa hề có trên Odoo?');">Thử tạo lại</button>
             </form>
           </td>
         </tr>
@@ -257,5 +553,17 @@
   </div>
 </div>
 {% endif %}
+
+<!-- Ghi chú về phiên làm việc ngầm -->
+<div class="alert alert-info" style="margin-top: 1.5rem;">
+  <svg class="alert-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="10"></circle>
+    <line x1="12" y1="16" x2="12" y2="12"></line>
+    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+  </svg>
+  <div class="alert-content">
+    <strong>Tiến trình hoạt động ngầm:</strong> Đăng xuất khỏi giao diện web chỉ kết thúc phiên làm việc trên trình duyệt của bạn. Các tác vụ tự động (đồng bộ lịch hai chiều, trợ lý AI gửi nhắc họp qua Telegram) vẫn tiếp tục vận hành ngầm ổn định. Để dừng hoàn toàn, hãy bấm "Tạm dừng" hoặc "Ngắt kết nối" từng dịch vụ tương ứng.
+  </div>
+</div>
 
 {% endblock %}

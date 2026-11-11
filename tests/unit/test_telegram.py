@@ -43,6 +43,8 @@ def test_telegram_issue_link_and_qr(telegram_components):
 
     link_data = service.issue_link(user_id=user_id)
     assert link_data.url.startswith("https://t.me/MyOdooBot?start=")
+
+
     assert link_data.qr_code_data_uri.startswith("data:image/png;base64,")
     assert link_data.expires_at > datetime.now(UTC)
 
@@ -60,6 +62,14 @@ def test_telegram_issue_link_and_qr(telegram_components):
         )
         # Old one deleted or invalidated, only 1 active link
         assert len(active_tokens) == 1
+
+
+def test_help_uses_conversation_instead_of_command_templates(telegram_components):
+    service, _, _, client = telegram_components
+    service._handle_help(123)
+    text = client.send_message.call_args.args[1]
+    assert '/crm' not in text and '/status' not in text and '/help' not in text
+    assert 'mô tả' in text and 'xem trước' in text
 
 
 def test_telegram_pairing_success(telegram_components):

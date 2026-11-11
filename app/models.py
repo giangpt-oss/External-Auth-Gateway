@@ -117,6 +117,9 @@ class GoogleConnection(Base):
     user = relationship("User", back_populates="google_connection")
 
 
+TELEGRAM_WEB_BINDING_PREFIX = "tg_bind_web_"
+
+
 class TelegramConnection(Base):
     __tablename__ = "telegram_connections"
 
@@ -135,6 +138,12 @@ class TelegramConnection(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
     user = relationship("User", back_populates="telegram_connection")
+
+    @property
+    def verified_on_web(self) -> bool:
+        return self.status == "connected" and bool(
+            self.binding_id and self.binding_id.startswith(TELEGRAM_WEB_BINDING_PREFIX)
+        )
 
 
 class CalendarPair(Base):

@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.models import LinkToken, OdooCredential, TelegramConnection, User
 from app.odoo.client import OdooAccessError, OdooClient, OdooError
 from app.security import decrypt_secret, ensure_utc, generate_secure_token, hash_token
-from app.telegram.client import TelegramClient
+from app.telegram.client import TelegramClient, normalize_agent_response
 
 _logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class TelegramService:
         base_cmd = cmd_part.split("@")[0] if cmd_part.startswith("/") else ""
 
         is_gw_cmd = False
-        if base_cmd in {"/start", "/help", "/status"}:
+        if base_cmd in {"/start", "/help", "/verify"} or (base_cmd == "/status" and len(cmd_tokens) == 1):
             is_gw_cmd = True
         elif base_cmd == "/crm":
             sub_cmd = cmd_tokens[1].lower() if len(cmd_tokens) > 1 else ""
@@ -158,11 +158,15 @@ class TelegramService:
 
         from app.models import TelegramUpdate
 
+        stored_update = update
+        if base_cmd == "/verify":
+            message_key = "message" if update.get("message") else "edited_message"
+            stored_update = {**update, message_key: {**message, "text": "/verify"}}
         with self.session_factory() as db:
             try:
                 db_update = TelegramUpdate(
                     update_id=update_id,
-                    payload=json.dumps(update, ensure_ascii=False),
+                    payload=json.dumps(stored_update, ensure_ascii=False),
                     status=initial_status,
                     delivery_status="none",
                     attempts=0,
@@ -182,6 +186,8 @@ class TelegramService:
                         self._handle_pairing(chat_id, telegram_user_id, username, token_arg)
                     else:
                         self._handle_start_help(chat_id, telegram_user_id)
+                elif base_cmd == "/verify":
+                    self._handle_browser_verification(chat_id, telegram_user_id, username, cmd_tokens)
                 elif base_cmd == "/help":
                     self._handle_help(chat_id)
                 elif base_cmd == "/status":
@@ -201,7 +207,7 @@ class TelegramService:
             if not self.enable_ai_forwarding:
                 self.telegram_client.send_message(
                     chat_id,
-                    "ℹ️ Tính năng AI Agent hiện đang tạm dừng kết nối. Vui lòng thử lại sau hoặc sử dụng các lệnh /crm, /status.",
+                    "Tính năng AI Agent hiện đang tạm dừng kết nối. Vui lòng thử lại sau hoặc kiểm tra kết nối tại cổng tài khoản.",
                 )
 
         return {"status": "ok"}
@@ -237,8 +243,12 @@ class TelegramService:
                 self._handle_pairing(chat_id, telegram_user_id, username, token_arg)
             else:
                 self._handle_start_help(chat_id, telegram_user_id)
+        elif base_cmd == "/verify":
+            self._handle_browser_verification(chat_id, telegram_user_id, username, text.split())
         elif base_cmd == "/help":
             self._handle_help(chat_id)
+        elif base_cmd == "/status" and len(text.split()) > 1:
+            self._handle_ai_turn(update, chat_id, telegram_user_id, username, text)
         elif base_cmd == "/status":
             self._handle_status(chat_id, telegram_user_id)
         elif base_cmd == "/crm":
@@ -253,6 +263,20 @@ class TelegramService:
         else:
             self._handle_ai_turn(update, chat_id, telegram_user_id, username, text)
 
+    def _handle_browser_verification(
+        self, chat_id: int, telegram_user_id: int, username: str | None, tokens: list[str],
+    ) -> None:
+        from app.telegram.web_verification import confirm_browser_code
+
+        settings = getattr(self, "settings", None)
+        if not settings or len(tokens) != 2:
+            message = "Hãy sao chép lệnh /verify từ portal Odoo."
+        else:
+            message = confirm_browser_code(
+                self.session_factory, settings, chat_id, telegram_user_id, username, tokens[1],
+            )
+        self.telegram_client.send_message(chat_id, message)
+
     def _handle_pairing(
         self,
         chat_id: int,
@@ -260,6 +284,11 @@ class TelegramService:
         username: str | None,
         token_arg: str,
     ) -> None:
+        if getattr(getattr(self, "settings", None), "ODOO_EMPLOYEE_TELEGRAM_ID_FIELD", ""):
+            self.telegram_client.send_message(
+                chat_id, "Vui lòng xác minh tài khoản Telegram trên cổng Auth Gateway.",
+            )
+            return
         token_hash = hash_token(token_arg)
         now = datetime.now(UTC)
 
@@ -335,11 +364,8 @@ class TelegramService:
         welcome_text = (
             f"🎉 <b>Liên kết thành công!</b>\n\n"
             f"Xin chào <b>{safe_name}</b>, tài khoản Telegram của bạn đã được kết nối an toàn với Odoo.\n\n"
-            f"Các lệnh hỗ trợ:\n"
-            f"👉 <code>/crm</code> : Tra cứu 5 cơ hội (Lead) mới nhất của bạn\n"
-            f"👉 <code>/crm từ_khóa</code> : Tìm kiếm cơ hội theo tên\n"
-            f"👉 <code>/status</code> : Xem trạng thái kết nối tài khoản\n"
-            f"👉 <code>/help</code> : Hướng dẫn sử dụng"
+            f"Bạn có thể trao đổi bằng lời bình thường để tra cứu dữ liệu, lập báo cáo hoặc thực hiện công việc. "
+            f"Tôi sẽ hỏi thông tin còn thiếu và xin xác nhận trước khi thay đổi dữ liệu. Bạn muốn bắt đầu việc gì?"
         )
         try:
             self.telegram_client.send_message(chat_id, welcome_text)
@@ -358,7 +384,7 @@ class TelegramService:
                 user_name = user.name if user else "bạn"
                 msg = (
                     f"👋 Xin chào <b>{html.escape(user_name)}</b>! Bạn đã liên kết với hệ thống Odoo.\n\n"
-                    f"Gõ <code>/crm</code> để tra cứu khách hàng hoặc <code>/help</code> để xem hướng dẫn."
+                    f"Bạn muốn tra cứu thông tin hay thực hiện công việc gì? Hãy mô tả yêu cầu của bạn."
                 )
             else:
                 msg = (
@@ -372,11 +398,8 @@ class TelegramService:
 
     def _handle_help(self, chat_id: int) -> None:
         help_text = (
-            "📖 <b>Danh sách lệnh hỗ trợ:</b>\n\n"
-            "🔹 <code>/crm</code> : Xem danh sách 5 cơ hội bán hàng được giao cho bạn\n"
-            "🔹 <code>/crm từ_khóa</code> : Tìm kiếm nhanh cơ hội theo tên khách hàng\n"
-            "🔹 <code>/status</code> : Kiểm tra trạng thái liên kết Odoo & Google\n"
-            "🔹 <code>/help</code> : Hiển thị bảng trợ giúp này"
+            "Tôi có thể hỗ trợ tra cứu dữ liệu Odoo, lập báo cáo, báo giá và công việc theo quyền tài khoản. "
+            "Bạn chỉ cần mô tả điều muốn làm; tôi sẽ hỏi thông tin còn thiếu và cho xem trước trước khi thay đổi dữ liệu."
         )
         self.telegram_client.send_message(chat_id, help_text)
 
@@ -533,7 +556,7 @@ class TelegramService:
             lines.append(f'{idx}. <a href="{lead_url}"><b>{lead_name}</b></a>')
             lines.append(f"   • Giai đoạn: <code>{stage_name}</code>")
 
-        lines.append("\n💡 <i>Gõ <code>/crm từ_khóa</code> để tìm kiếm cơ hội cụ thể.</i>")
+        lines.append("\nBạn muốn xem cơ hội nào? Có thể cho biết tên khách hàng hoặc nội dung cần tìm.")
         response_text = "\n".join(lines)
         self.telegram_client.send_message(chat_id, response_text)
 
@@ -570,16 +593,10 @@ class TelegramService:
         return chunks
 
     def _safe_send_message(self, chat_id: int, text: str) -> None:
-        chunks = self._split_text(text)
-        for chunk in chunks:
-            try:
-                self.telegram_client.send_message(chat_id, chunk, parse_mode="Markdown")
-            except Exception:
-                try:
-                    self.telegram_client.send_message(chat_id, chunk, parse_mode="")
-                except Exception as e:
-                    _logger.warning("Failed to send telegram message chunk: %s", e)
-                    raise
+        from app.telegram.text import plain_text
+        for chunk in self._split_text(plain_text(text)):
+            # Plain text has no parse-error fallback. Never replay an uncertain send.
+            self.telegram_client.send_message(chat_id, chunk, parse_mode="")
 
     def _handle_ai_turn(
         self,
@@ -619,17 +636,18 @@ class TelegramService:
                 return
 
             user_id = user.id
+            binding_id = conn.binding_id
 
         # 2. Check AI forwarding toggle
         if not self.enable_ai_forwarding:
             self.telegram_client.send_message(
                 chat_id,
-                "ℹ️ Tính năng AI Agent hiện đang tạm dừng kết nối. Vui lòng thử lại sau hoặc sử dụng các lệnh /crm, /status.",
+                "Tính năng AI Agent hiện đang tạm dừng kết nối. Vui lòng thử lại sau hoặc kiểm tra kết nối tại cổng tài khoản.",
             )
             return
 
         # 3. Check TelegramUpdate record for idempotency and resume
-        messages_to_send: list[str] = []
+        delivery = None
         with self.session_factory() as db:
             import json
 
@@ -638,10 +656,23 @@ class TelegramService:
             up_record = None
             if update_id:
                 up_record = db.query(TelegramUpdate).filter_by(update_id=update_id).first()
+                if up_record is None:
+                    from sqlalchemy.exc import IntegrityError
+
+                    up_record = TelegramUpdate(
+                        update_id=update_id, user_id=user_id,
+                        payload=json.dumps(update, ensure_ascii=False), status="pending",
+                    )
+                    db.add(up_record)
+                    try:
+                        db.commit()
+                    except IntegrityError:
+                        db.rollback()
+                        return
                 if up_record:
                     if up_record.status == "processed":
                         return
-                    if up_record.delivery_status == "delivery_unknown":
+                    if up_record.delivery_status in {"delivery_unknown", "sending"}:
                         _logger.warning(
                             "Update %s has unknown delivery status. Avoiding duplicate resend.",
                             update_id,
@@ -649,21 +680,29 @@ class TelegramService:
                         return
                     if up_record.status == "ai_received" and up_record.ai_response:
                         try:
-                            messages_to_send = json.loads(up_record.ai_response)
+                            cached = json.loads(up_record.ai_response)
+                            delivery = normalize_agent_response(cached)
+                            if isinstance(cached, dict) and cached.get("telegram_binding_id") != binding_id:
+                                return
                         except Exception:
                             pass
 
         # 4. If AI messages not yet fetched, call AI Agent
-        if not messages_to_send:
+        if delivery is None:
             if update_id:
                 with self.session_factory() as db:
                     from app.models import TelegramUpdate
 
                     # Conditional lock / update
-                    db.query(TelegramUpdate).filter_by(update_id=update_id).update(
+                    claimed = db.query(TelegramUpdate).filter_by(update_id=update_id).filter(
+                        TelegramUpdate.status.in_(["pending", "retry_wait", "failed"]),
+                        TelegramUpdate.delivery_status.notin_(["sending", "delivery_unknown"]),
+                    ).update(
                         {"status": "processing_ai"}
                     )
                     db.commit()
+                    if not claimed:
+                        return
 
             ai_url = f"{self.ai_agent_base_url}/internal/v1/telegram/turn"
             headers = {
@@ -675,6 +714,7 @@ class TelegramService:
                 "gateway_user_id": user_id,
                 "telegram_user_id": telegram_user_id,
                 "chat_id": chat_id,
+                "telegram_binding_id": binding_id,
                 "text": text,
                 "received_at": datetime.now(UTC).isoformat(),
             }
@@ -682,10 +722,12 @@ class TelegramService:
             import httpx
 
             try:
-                resp = httpx.post(ai_url, json=req_payload, headers=headers, timeout=25.0)
+                resp = httpx.post(ai_url, json=req_payload, headers=headers, timeout=35.0)
                 if resp.status_code == 200:
                     data = resp.json()
-                    messages_to_send = data.get("messages", [])
+                    if data.get("request_id") != req_payload["request_id"]:
+                        raise ValueError("AI response request identifier mismatch")
+                    delivery = normalize_agent_response(data)
                 else:
                     _logger.error("AI Agent returned %s: %s", resp.status_code, resp.text)
                     self.telegram_client.send_message(
@@ -717,7 +759,7 @@ class TelegramService:
                         db.commit()
                 return
 
-            if update_id and messages_to_send:
+            if update_id and delivery is not None:
                 with self.session_factory() as db:
                     import json
 
@@ -725,25 +767,54 @@ class TelegramService:
 
                     db.query(TelegramUpdate).filter_by(update_id=update_id).update(
                         {
-                            "ai_response": json.dumps(messages_to_send, ensure_ascii=False),
+                            "ai_response": json.dumps(
+                                {**delivery, "telegram_binding_id": binding_id}, ensure_ascii=False
+                            ),
                             "status": "ai_received",
+                            "user_id": user_id,
                         }
                     )
                     db.commit()
 
-        # 5. Deliver messages to Telegram
+        # 5. Deliver messages and internal artifacts; unknown sends are never replayed.
+        if delivery is None:
+            return
+        chunks = [
+            chunk for message in delivery["messages"] for chunk in self._split_text(message)
+        ]
+        chunks.extend({"type": "document", **item} for item in delivery["attachments"])
         if update_id:
             with self.session_factory() as db:
                 from app.models import TelegramUpdate
 
-                db.query(TelegramUpdate).filter_by(update_id=update_id).update(
-                    {"delivery_status": "sending"}
+                claimed = db.query(TelegramUpdate).filter_by(
+                    update_id=update_id, status="ai_received"
+                ).filter(TelegramUpdate.delivery_status.notin_(["sending", "delivery_unknown"])).update(
+                    {
+                        "delivery_status": "sending",
+                        "delivery_chunks": json.dumps(chunks, ensure_ascii=False),
+                        "delivery_index": 0,
+                    }
                 )
                 db.commit()
+                if not claimed:
+                    return
 
         try:
-            for msg in messages_to_send:
-                self._safe_send_message(chat_id, msg)
+            for index, chunk in enumerate(chunks):
+                self._verify_ai_recipient(user_id, telegram_user_id, chat_id, binding_id)
+                if isinstance(chunk, str):
+                    self.telegram_client.send_message(chat_id, chunk, parse_mode="")
+                else:
+                    self._send_ai_attachment(
+                        user_id, telegram_user_id, chat_id, binding_id, chunk["artifact_id"]
+                    )
+                if update_id:
+                    with self.session_factory() as db:
+                        db.query(TelegramUpdate).filter_by(update_id=update_id).update(
+                            {"delivery_index": index + 1}
+                        )
+                        db.commit()
             if update_id:
                 with self.session_factory() as db:
                     from app.models import TelegramUpdate
@@ -755,6 +826,7 @@ class TelegramService:
                         }
                     )
                     db.commit()
+
         except Exception as e:
             _logger.error("Failed to deliver message to Telegram chat %s: %s", chat_id, e)
             if update_id:
@@ -769,6 +841,37 @@ class TelegramService:
                     )
                     db.commit()
 
+    def _verify_ai_recipient(
+        self, user_id: int, telegram_user_id: int, chat_id: int, binding_id: str
+    ) -> None:
+        with self.session_factory() as db:
+            conn = db.query(TelegramConnection).filter_by(
+                user_id=user_id, telegram_user_id=telegram_user_id, private_chat_id=chat_id,
+                binding_id=binding_id, status="connected",
+            ).first()
+            user = db.query(User).filter_by(id=user_id, active=True).first()
+            if not conn or not user:
+                raise ValueError("Telegram recipient or binding changed before delivery")
+
+    def _send_ai_attachment(
+        self, user_id: int, telegram_user_id: int, chat_id: int,
+        binding_id: str, artifact_id: str,
+    ) -> None:
+        from app.reporting.artifacts import load_artifact, revalidate_for_delivery
+
+        if not getattr(self, "settings", None):
+            raise ValueError("Document delivery requires configured gateway settings")
+        revalidate_for_delivery(
+            self.settings, self.session_factory, user_id, telegram_user_id, chat_id,
+            binding_id, artifact_id=artifact_id,
+        )
+        artifact = load_artifact(self.session_factory, user_id, artifact_id, binding_id)
+        self._verify_ai_recipient(user_id, telegram_user_id, chat_id, binding_id)
+        self.telegram_client.send_document(
+            chat_id, artifact["filename"], artifact["content"],
+            content_type=artifact["content_type"],
+        )
+
 
 def create_telegram_service(
     settings: Any,
@@ -782,7 +885,7 @@ def create_telegram_service(
     if odoo_client is None:
         odoo_client = OdooClient(url=settings.ODOO_URL, db=settings.ODOO_DB)
 
-    return TelegramService(
+    service = TelegramService(
         session_factory=session_factory,
         telegram_client=telegram_client,
         bot_username=settings.TELEGRAM_BOT_USERNAME,
@@ -794,3 +897,5 @@ def create_telegram_service(
         ai_agent_base_url=settings.AI_AGENT_BASE_URL,
         gateway_to_agent_secret=settings.GATEWAY_TO_AGENT_SECRET,
     )
+    service.settings = settings
+    return service

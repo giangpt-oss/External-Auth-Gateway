@@ -118,6 +118,7 @@ def test_action_in_progress_expired_becomes_unknown_result(test_setup):
         op = ActionOperation(
             operation_id="op_expired_in_progress",
             user_id=user_id,
+            telegram_binding_id="tg_bind_task3",
             action="calendar.create",
             payload_hash=p_hash,
             status="in_progress",

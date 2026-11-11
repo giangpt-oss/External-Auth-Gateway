@@ -3,16 +3,34 @@
 {% block title %}Đăng nhập — External Auth Gateway{% endblock %}
 
 {% block content %}
-<div style="max-width: 440px; margin: 2rem auto;">
-  <div class="card" style="padding: 2rem;">
-    <h1 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; text-align: center;">Cổng Xác Thực & Đồng Bộ</h1>
-    <p style="font-size: 0.875rem; color: var(--text-muted); text-align: center; margin-bottom: 1.5rem;">
-      Đăng nhập bằng tài khoản nhân viên Odoo đã được cấp
-    </p>
+<div class="auth-wrapper">
+  <div class="card auth-card">
+    <!-- Portal Header Identity -->
+    <div style="text-align: center; margin-bottom: 1.75rem;">
+      <div style="display: inline-flex; align-items: center; justify-content: center; width: 48px; height: 48px; border-radius: var(--radius-md); background: var(--primary-50); border: 1px solid var(--primary-200); color: var(--primary); margin-bottom: 1rem;">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+        </svg>
+      </div>
+      <h1 class="auth-title">
+        Cổng Xác Thực & Đồng Bộ
+      </h1>
+      <p style="font-size: 0.875rem; color: var(--text-secondary); line-height: 1.45;">
+        Cổng liên kết tài khoản dành cho nhân viên. Đăng nhập bằng tài khoản Odoo để quản lý liên kết Google Workspace và trợ lý Telegram cá nhân.
+      </p>
+    </div>
 
     {% if error %}
     <div class="alert alert-danger" role="alert">
-      {{ error }}
+      <svg class="alert-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <div class="alert-content">
+        {{ error }}
+      </div>
     </div>
     {% endif %}
 
@@ -20,32 +38,42 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
       <div class="form-group">
-        <label for="login">Email Odoo của bạn</label>
-        <input type="email" id="login" name="login" required placeholder="nhanvien@congty.com" autocomplete="off" autofocus>
+        <label for="login" class="form-label">Email Odoo của bạn</label>
+        <input type="email" id="login" name="login" required placeholder="nhanvien@congty.com" autocomplete="username" autofocus>
       </div>
 
       <div class="form-group">
-        <label for="credential_kind">Hình thức xác thực</label>
+        <label for="credential_kind" class="form-label">Hình thức xác thực</label>
         <select id="credential_kind" name="credential_kind" required>
           <option value="password">Mật khẩu tài khoản Odoo</option>
-          <option value="api_key">API Key cá nhân (Khuyên dùng)</option>
+          <option value="api_key" selected>API Key cá nhân (Khuyên dùng)</option>
         </select>
-        <p class="help-text">Nếu tài khoản dùng SSO hoặc Odoo Online, hãy dùng API Key cá nhân từ trang thông tin cá nhân trên Odoo.</p>
+        <p class="help-text">
+          Nếu tài khoản công ty dùng SSO Google hoặc Odoo Online, hãy dùng API Key cá nhân được tạo tại mục "Tài khoản của tôi" trên Odoo.
+        </p>
       </div>
 
       <div class="form-group">
-        <label for="secret">Mật khẩu hoặc API Key</label>
-        <input type="password" id="secret" name="secret" required placeholder="Nhập mật khẩu hoặc API Key" autocomplete="new-password">
+        <label for="secret" class="form-label">Mật khẩu hoặc API Key</label>
+        <input type="password" id="secret" name="secret" required placeholder="Nhập mật khẩu hoặc API Key" autocomplete="current-password">
       </div>
 
-      <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem; padding: 0.75rem;">
-        Đăng nhập
-      </button>
+      <div style="margin-top: 1.5rem;">
+        <button type="submit" class="btn btn-primary btn-block" style="padding: 0.75rem 1rem; font-size: 0.925rem;">
+          Đăng nhập vào Portal
+        </button>
+      </div>
     </form>
   </div>
 
-  <div class="alert alert-info" style="font-size: 0.8rem; line-height: 1.4;">
-    <strong>Lưu ý bảo mật:</strong> Hệ thống kết nối trực tiếp đến Odoo Online Enterprise qua API cá nhân của bạn. Thông tin xác thực được mã hóa AES-256 an toàn và chỉ dùng để thực hiện các thao tác theo đúng phân quyền của bạn.
+  <!-- Reassuring Security Footnote -->
+  <div style="display: flex; align-items: flex-start; gap: 0.65rem; padding: 0.875rem 1rem; background: var(--bg-surface-subtle); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); font-size: 0.78125rem; color: var(--text-muted); line-height: 1.45;">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink: 0; color: var(--primary); margin-top: 0.1rem;">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+    </svg>
+    <div>
+      <strong style="color: var(--text-main); font-weight: 600;">Bảo mật thông tin:</strong> Hệ thống kết nối trực tiếp đến Odoo Online Enterprise. Thông tin xác thực được mã hóa bằng AES-256 an toàn và chỉ thao tác theo đúng phân quyền của bạn.
+    </div>
   </div>
 </div>
 {% endblock %}

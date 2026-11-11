@@ -13,6 +13,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = Settings()
 
+    from app.business import models as business_models  # noqa: F401
+    from app.quotations import execution as quotation_execution  # noqa: F401
+    from app.quotations import jobs as quotation_jobs  # noqa: F401
+    from app.reporting import models as reporting_models  # noqa: F401
+
     engine, session_factory = init_db(settings.DATABASE_URL)
 
     @asynccontextmanager
@@ -20,6 +25,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.engine = engine
         app.state.session_factory = session_factory
+
+        report_worker = None
+        quote_worker = None
+        quote_execution_worker = None
+        if settings.ENABLE_QUOTATIONS and settings.APP_ENV != 'test':
+            from app.quotations.jobs import QuotePreparationWorker
+            quote_worker = QuotePreparationWorker(settings, session_factory)
+            quote_worker.start()
+            from app.quotations.execution import QuoteExecutionWorker
+            quote_execution_worker = QuoteExecutionWorker(settings, session_factory)
+            quote_execution_worker.start()
+        if settings.ENABLE_REPORTING and settings.APP_ENV != "test":
+            from app.reporting.worker import ReportWorker
+            report_worker = ReportWorker(settings, session_factory)
+            report_worker.start()
 
         scheduler = None
         ai_worker = None
@@ -34,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from app.odoo.client import OdooClient
             from app.telegram.client import TelegramClient
 
-            redirect_uri = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/oauth/google/callback"
+            redirect_uri = settings.google_redirect_uri
             google_oauth = GoogleOAuthService(
                 session_factory=session_factory,
                 client_id=settings.GOOGLE_CLIENT_ID,
@@ -140,6 +160,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         yield
 
+        if report_worker:
+            report_worker.stop()
+        if quote_worker:
+            quote_worker.stop()
+        if quote_execution_worker:
+            quote_execution_worker.stop()
         if poller_stop_event:
             poller_stop_event.set()
         if ai_worker:
@@ -187,6 +213,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.internal.routes import router as internal_router
     from app.portal.routes import router as portal_router
     from app.telegram.routes import router as telegram_router
+    from app.workspace.routes import portal_router as workspace_download_router
+    from app.workspace.routes import router as workspace_router
 
     static_dir = Path(__file__).resolve().parent / "portal" / "static"
     if static_dir.exists():
@@ -197,6 +225,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(google_router)
     app.include_router(telegram_router)
     app.include_router(internal_router)
+    from app.quotations.routes import router as quotations_router
+    from app.reporting.routes import router as reporting_router
+
+    app.include_router(reporting_router)
+    app.include_router(quotations_router)
+    from app.business.routes import router as business_router
+    app.include_router(business_router)
+    app.include_router(workspace_router)
+    app.include_router(workspace_download_router)
 
     return app
 

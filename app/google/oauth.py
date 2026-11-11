@@ -17,6 +17,7 @@ from app.security import (
     generate_secure_token,
     hash_token,
 )
+from app.workspace.catalog import oauth_scopes
 
 
 class GoogleOAuthError(Exception):
@@ -44,13 +45,16 @@ class GoogleOAuthService:
     TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
     REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 
-    DEFAULT_SCOPES = [
+    DEFAULT_SCOPES = sorted(set([
         "openid",
         "email",
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.send",
-    ]
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+    ] + oauth_scopes()))
 
     def __init__(
         self,
@@ -93,7 +97,8 @@ class GoogleOAuthService:
         code_challenge = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
         return code_verifier, code_challenge
 
-    def begin(self, user_id: int, session_id: int | None = None) -> tuple[str, str]:
+    def begin(self, user_id: int, session_id: int | None = None, services: list[str] | None = None) -> tuple[str, str]:
+        requested_scopes = self.DEFAULT_SCOPES if services is None else ["openid", "email", *oauth_scopes(services)]
         state = generate_secure_token(32)
         state_hash = hash_token(state)
         nonce = generate_secure_token(24)
@@ -122,7 +127,7 @@ class GoogleOAuthService:
             db.add(token_rec)
             db.commit()
 
-        scopes_str = " ".join(self.DEFAULT_SCOPES)
+        scopes_str = " ".join(requested_scopes)
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
@@ -130,6 +135,7 @@ class GoogleOAuthService:
             "scope": scopes_str,
             "access_type": "offline",
             "prompt": "consent",
+            "include_granted_scopes": "true",
             "state": state,
             "nonce": nonce,
             "code_challenge": code_challenge,

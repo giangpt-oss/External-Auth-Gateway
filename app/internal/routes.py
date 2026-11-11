@@ -24,6 +24,8 @@ from app.odoo.client import (
 )
 from app.odoo.service import OdooService
 from app.security import decrypt_secret
+from app.workspace.catalog import SERVICES
+from app.workspace.service import WorkspaceError, WorkspaceService
 
 _logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ class IdentityResolveRequest(BaseModel):
 def _get_google_client(request: Request) -> GoogleClient:
     settings = request.app.state.settings
     session_factory = request.app.state.session_factory
-    redirect_uri = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/oauth/google/callback"
+    redirect_uri = settings.google_redirect_uri
     oauth_service = GoogleOAuthService(
         session_factory=session_factory,
         client_id=settings.GOOGLE_CLIENT_ID,
@@ -214,6 +216,8 @@ def resolve_identity(
                 "name": user.name,
                 "login": user.login,
                 "tz": user.tz or "Asia/Bangkok",
+                "telegram_user_id": conn.telegram_user_id,
+                "chat_id": conn.private_chat_id,
                 "telegram_binding_id": conn.binding_id,
                 "job_title": job_title,
                 "department": department,
@@ -437,6 +441,9 @@ def execute_user_action(
     req: UserActionRequest,
     request: Request,
 ):
+    if req.action.startswith('business.'):
+        from app.business.routes import execute_business_action
+        return execute_business_action(user_id, req, request)
     settings = request.app.state.settings
     session_factory = request.app.state.session_factory
     with session_factory() as db:
@@ -491,11 +498,16 @@ def execute_user_action(
             "calendar.create": "calendar.write",
             "calendar.update": "calendar.write",
             "gmail.send": "gmail.send",
+            "sales.quotation.create": "sales.create",
             "crm.create": "crm.create",
             "crm.update": "crm.write",
         }
+        action_perm_map.update({f"workspace.{name}.write": f"workspace.{name}.write" for name in SERVICES})
         if req.action not in action_perm_map:
             return {"status": "SERVICE_ERROR", "message": f"Action không được hỗ trợ: {req.action}"}
+
+        if req.action == "sales.quotation.create" and not settings.ENABLE_QUOTATIONS:
+            return {"status": "SERVICE_ERROR", "message": "Chức năng báo giá chưa được bật."}
 
         needed_perm = action_perm_map[req.action]
         if needed_perm not in permissions:
@@ -511,6 +523,8 @@ def execute_user_action(
 
         op = db.query(ActionOperation).filter_by(user_id=user_id, operation_id=req.operation_id).first()
         if op:
+            if op.telegram_binding_id != req.telegram_binding_id:
+                raise HTTPException(403, "Thao tác thuộc phiên liên kết khác.")
             if op.payload_hash != payload_hash:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -525,11 +539,20 @@ def execute_user_action(
                     c_dt = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
                     if (datetime.now(UTC) - c_dt).total_seconds() > 30:
                         is_expired = True
+                if req.action == 'sales.quotation.create':
+                    from app.quotations.execution import QuoteExecutionJob
+                    active_job = db.query(QuoteExecutionJob).filter_by(user_id=user_id, operation_id=req.operation_id).first()
+                    if active_job and active_job.status in ('queued', 'executing'):
+                        is_expired = False
                 if is_expired:
-                    op.status = "unknown_result"
-                    op.error_message = "Thao tác trước đó quá hạn theo dõi chưa có kết quả, không thể tự động thực hiện lại."
+                    message = "Thao tác trước đó quá hạn theo dõi chưa có kết quả, không thể tự động thực hiện lại."
+                    db.query(ActionOperation).filter_by(id=op.id, status="in_progress").update(
+                        {"status": "unknown_result", "error_message": message}, synchronize_session=False)
                     db.commit()
-                    return {"status": "UNKNOWN_RESULT", "message": op.error_message}
+                    db.refresh(op)
+                    if op.status == "completed":
+                        return json.loads(op.result_json) if op.result_json else {"status": "completed"}
+                    return {"status": "UNKNOWN_RESULT", "message": message}
                 return {"status": "IN_PROGRESS", "message": "Thao tác đang được thực thi bởi một tiến trình khác."}
             if op.status == "unknown_result":
                 return {"status": "UNKNOWN_RESULT", "message": "Thao tác trước đó chưa rõ kết quả do quá hạn chờ, không thể tự động thực hiện lại."}
@@ -548,6 +571,11 @@ def execute_user_action(
                 telegram_binding_id=req.telegram_binding_id,
             )
             db.add(op)
+            if req.action == 'sales.quotation.create':
+                from app.quotations.execution import QuoteExecutionJob
+                scope = {'telegram_user_id': req.telegram_user_id, 'chat_id': req.chat_id, 'telegram_binding_id': req.telegram_binding_id}
+                db.add(QuoteExecutionJob(operation_id=req.operation_id, user_id=user_id, tenant=user.tenant,
+                    database=user.database, scope_json=json.dumps(scope), payload_json=json.dumps(args, ensure_ascii=False)))
             db.commit()
         except IntegrityError as err:
             db.rollback()
@@ -569,6 +597,16 @@ def execute_user_action(
 
         # 4. Thực thi action với schema cố định
         try:
+            if req.action == "sales.quotation.create":
+                return {'status': 'in_progress', 'message': 'Đã nhận xác nhận, đang tạo báo giá trong nền.', 'operation_id': req.operation_id}
+            if req.action.startswith("workspace."):
+                service_name = req.action.split(".")[1]
+                result = WorkspaceService(_get_google_client(request), settings.ENCRYPTION_KEY).execute(user_id, service_name, args)
+                final_res = {"status": "completed", "result": result["data"]}
+                op.status = "completed"
+                op.result_json = json.dumps(final_res, ensure_ascii=False)
+                db.commit()
+                return final_res
             if req.action == "calendar.create":
                 summary = args.get("summary")
                 start_time = args.get("start_time")
@@ -784,10 +822,30 @@ def execute_user_action(
                 db.commit()
                 return final_res
 
+        except WorkspaceError as e:
+            op.status = "unknown_result" if e.code == "UNKNOWN_RESULT" else "failed"
+            op.error_message = str(e)
+            db.commit()
+            return {"status": e.code, "message": str(e)}
         except Exception as e:
             import httpx
 
             from app.google.oauth import GoogleAuthRevokedError
+
+            if req.action == "sales.quotation.create":
+                db.rollback()
+                unknown = isinstance(e, httpx.TimeoutException | OdooNetworkError)
+                db.query(ActionOperation).filter(
+                    ActionOperation.id == op.id,
+                    ActionOperation.status.in_(["in_progress", "unknown_result"]),
+                ).update({"status": "unknown_result" if unknown else "failed",
+                          "error_message": str(e)}, synchronize_session=False)
+                db.commit()
+                db.refresh(op)
+                if op.status == "completed":
+                    return json.loads(op.result_json) if op.result_json else {"status": "completed"}
+                return {"status": "UNKNOWN_RESULT" if unknown else "SERVICE_ERROR",
+                        "message": "Kết quả tạo chưa rõ; cần đối soát, không tự tạo lại." if unknown else str(e)}
 
             if isinstance(e, GoogleAuthRevokedError):
                 op.status = "failed"
@@ -797,7 +855,7 @@ def execute_user_action(
                     "status": "RECONNECT_REQUIRED",
                     "message": "Google token bị thu hồi hoặc cần xác thực lại.",
                 }
-            if isinstance(e, httpx.TimeoutException):
+            if isinstance(e, httpx.TimeoutException | OdooNetworkError):
                 op.status = "unknown_result"
                 op.error_message = "Timeout waiting for external service"
                 db.commit()
@@ -828,6 +886,14 @@ def get_user_action_status(
     - Operation cũ thiếu binding không tự động trả kết quả chi tiết.
     - Trả 'not_found' nếu chưa có trong sổ (không đồng nghĩa thao tác chưa từng xảy ra).
     """
+    from app.business.routes import business_action_status
+    from app.reporting.schemas import TelegramScope
+    # Only intercept actions handled by the new ledger; old integrations retain their contracts.
+    with request.app.state.session_factory() as probe_db:
+        probe = probe_db.query(ActionOperation.action).filter_by(user_id=user_id, operation_id=operation_id).first()
+    if probe and probe[0].startswith('business.'):
+        binding = TelegramScope(telegram_user_id=telegram_user_id, chat_id=chat_id, telegram_binding_id=telegram_binding_id)
+        return business_action_status(user_id, operation_id, binding, request)
     session_factory = request.app.state.session_factory
     with session_factory() as db:
         user = db.query(User).filter_by(id=user_id).first()
@@ -889,9 +955,11 @@ def get_user_action_status(
                 "calendar.create": "calendar.write",
                 "calendar.update": "calendar.write",
                 "gmail.send": "gmail.send",
-                "crm.create": "crm.create",
+                "sales.quotation.create": "sales.create",
+            "crm.create": "crm.create",
                 "crm.update": "crm.write",
             }
+            action_perm_map.update({f"workspace.{name}.write": f"workspace.{name}.write" for name in SERVICES})
             if op.action in action_perm_map:
                 needed_perm = action_perm_map[op.action]
                 g_conn = user.google_connection
@@ -916,6 +984,27 @@ def get_user_action_status(
                         },
                     )
 
+        if op.action == "sales.quotation.create" and op.status in ("unknown_result", "in_progress"):
+            from app.quotations.execution import QuoteExecutionJob
+            from app.quotations.service import QuotationService
+            execution_job = db.query(QuoteExecutionJob).filter_by(user_id=user_id, operation_id=operation_id).first()
+            still_working = execution_job and execution_job.status in ('queued', 'executing')
+            created = op.created_at
+            age = (datetime.now(UTC) - (created if created.tzinfo else created.replace(tzinfo=UTC))).total_seconds() if created else 60
+            if not still_working and (op.status == "unknown_result" or age > 30):
+                from app.quotations.tracking import reconcile_tracked
+                reconciled = reconcile_tracked(session_factory, user_id, operation_id, user.tenant, user.database,
+                    QuotationService(odoo_svc.client, user.odoo_uid, secret))
+                updates = {"status": "unknown_result"}
+                if reconciled.get("status") == "completed":
+                    updates = {"status": "completed", "result_json": json.dumps(reconciled, ensure_ascii=False)}
+                db.query(ActionOperation).filter(
+                    ActionOperation.id == op.id,
+                    ActionOperation.status.in_(["unknown_result", "in_progress"]),
+                ).update(updates, synchronize_session=False)
+                db.commit()
+                db.refresh(op)
+
         # Trích xuất result nếu có
         res_data = None
         if op.status == "completed" and op.result_json:
@@ -930,12 +1019,14 @@ def get_user_action_status(
                     res_data = None
 
         up_at = op.updated_at or op.created_at
+        from app.quotations.execution import error_summary
         return {
             "operation_id": op.operation_id,
             "action": op.action,
             "status": op.status,
             "result": res_data,
             "updated_at": up_at.isoformat() if up_at else None,
+            "message": error_summary(op.error_message) if op.error_message else None,
         }
 
 
@@ -1079,6 +1170,7 @@ class OdooQueryRequest(BaseModel):
     limit: int | None = 10
     offset: int | None = 0
     order: str | None = None
+    count_only: bool | None = False
 
 
 @router.get("/odoo/catalog")
@@ -1124,6 +1216,7 @@ def query_odoo_records(
                 limit=req.limit,
                 offset=req.offset,
                 order=req.order,
+                count_only=bool(req.count_only),
             )
             return {
                 "status": "OK",

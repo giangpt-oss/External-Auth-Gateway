@@ -1,5 +1,69 @@
 // Client side helper for Telegram QR code linking
 document.addEventListener("DOMContentLoaded", () => {
+  const verificationOptions = document.getElementById("telegram-verification-options");
+  const verificationProgress = document.getElementById("telegram-verification-progress");
+
+  if (verificationOptions && verificationProgress) {
+    const initialRevision = verificationOptions.dataset.telegramRevision;
+    const initialState = verificationOptions.dataset.telegramState;
+    let verificationDeadline = 0;
+    let pollTimer;
+    let checking = false;
+
+    async function checkVerification() {
+      if (checking) return;
+      checking = true;
+      clearTimeout(pollTimer);
+      let keepPolling = true;
+
+      try {
+        const response = await fetch("/connections/telegram/verification-status", { cache: "no-store" });
+        if (response.status === 401) {
+          verificationProgress.hidden = false;
+          verificationProgress.textContent = "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
+          keepPolling = false;
+          return;
+        }
+        if (response.ok) {
+          const result = await response.json();
+          if (result.verified && result.revision !== initialRevision && verificationDeadline) {
+            keepPolling = false;
+            window.location.replace("/?status=telegram_verified");
+            return;
+          }
+          if (result.state !== initialState && !verificationDeadline) {
+            keepPolling = false;
+            window.location.replace("/");
+            return;
+          }
+        }
+      } catch {
+        // Retry on a temporary network error.
+      } finally {
+        checking = false;
+        if (verificationDeadline && Date.now() >= verificationDeadline) {
+          verificationDeadline = 0;
+          verificationProgress.textContent = "Chưa nhận được xác minh thành công. Bạn có thể thử lại.";
+        }
+        if (keepPolling && (verificationDeadline || !document.hidden)) {
+          pollTimer = setTimeout(checkVerification, verificationDeadline ? 2000 : 15000);
+        }
+      }
+    }
+
+    verificationOptions.addEventListener("submit", () => {
+      verificationDeadline = Date.now() + 5 * 60 * 1000;
+      verificationProgress.hidden = false;
+      verificationProgress.textContent = "Đang chờ kết quả từ Telegram…";
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(checkVerification, 2000);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) checkVerification();
+    });
+    if (!document.hidden) pollTimer = setTimeout(checkVerification, 15000);
+  }
+
   const linkTgBtn = document.getElementById("btn-link-telegram");
   const tgContainer = document.getElementById("telegram-link-box");
 
