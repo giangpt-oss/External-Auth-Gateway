@@ -1,0 +1,59 @@
+x-workspace: &workspace
+  build: .
+  env_file: .env
+  environment:
+    DATABASE_URL: ${WORKSPACE_POSTGRES_URL:?Set WORKSPACE_POSTGRES_URL}
+    WORKSPACE_EMBEDDED_WORKER: 'false'
+  networks: [gateway_net]
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${WORKSPACE_POSTGRES_PASSWORD:?Set WORKSPACE_POSTGRES_PASSWORD}
+    volumes:
+      - workspace_postgres:/var/lib/postgresql/data
+    networks: [gateway_net]
+    healthcheck:
+      test: [CMD, pg_isready, -U, gateway, -d, gateway]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    <<: *workspace
+    command: [python, -m, app.db_bootstrap]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    environment:
+      DATABASE_URL: ${WORKSPACE_POSTGRES_URL:?Set WORKSPACE_POSTGRES_URL}
+      WORKSPACE_EMBEDDED_WORKER: 'false'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  workspace-worker:
+    <<: *workspace
+    command: [python, -m, app.workspace.worker_main]
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  drive-indexer:
+    <<: *workspace
+    command: [python, -m, app.workspace.worker_main, --drive-indexer]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  workspace_postgres:

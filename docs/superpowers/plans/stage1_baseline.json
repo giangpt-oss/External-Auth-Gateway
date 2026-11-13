@@ -1,0 +1,26 @@
+{
+  "created_at": "2026-11-13T09:46:56.846901+00:00",
+  "environment": "isolated fixtures",
+  "suites": {
+    "gateway": {
+      "test": "tests/integration/test_workspace_jobs_execution_flow.py",
+      "exit_code": 0,
+      "measurements": [
+        "{\"stages\": {\"classification_ms\": {\"avg\": 0.0, \"count\": 0, \"p50\": 0.0, \"p95\": 0.0}, \"external_call_ms\": {\"avg\": 0.38, \"count\": 2, \"p50\": 0.36, \"p95\": 0.36}, \"internal_retrieval_ms\": {\"avg\": 0.0, \"count\": 0, \"p50\": 0.0, \"p95\": 0.0}, \"llm_synthesis_ms\": {\"avg\": 0.0, \"count\": 0, \"p50\": 0.0, \"p95\": 0.0}, \"permission_check_ms\": {\"avg\": 1.09, \"count\": 3, \"p50\": 0.71, \"p95\": 0.71}, \"queue_wait_ms\": {\"avg\": 42.85, \"count\": 4, \"p50\": 37.85, \"p95\": 44.85}, \"token_refresh_ms\": {\"avg\": 0.08, \"count\": 1, \"p50\": 0.08, \"p95\": 0.08}, \"total_duration_ms\": {\"avg\": 247.48, \"count\": 4, \"p50\": 243.91, \"p95\": 249.88}}, \"total_records\": 4}"
+      ],
+      "output": "{\"stages\": {\"classification_ms\": {\"avg\": 0.0, \"count\": 0, \"p50\": 0.0, \"p95\": 0.0}, \"external_call_ms\": {\"avg\": 0.38, \"count\": 2, \"p50\": 0.36, \"p95\": 0.36}, \"internal_retrieval_ms\": {\"avg\": 0.0, \"count\": 0, \"p50\": 0.0, \"p95\": 0.0}, \"llm_synthesis_ms\": {\"avg\": 0.0, \"count\": 0, \"p50\": 0.0, \"p95\": 0.0}, \"permission_check_ms\": {\"avg\": 1.09, \"count\": 3, \"p50\": 0.71, \"p95\": 0.71}, \"queue_wait_ms\": {\"avg\": 42.85, \"count\": 4, \"p50\": 37.85, \"p95\": 44.85}, \"token_refresh_ms\": {\"avg\": 0.08, \"count\": 1, \"p50\": 0.08, \"p95\": 0.08}, \"total_duration_ms\": {\"avg\": 247.48, \"count\": 4, \"p50\": 243.91, \"p95\": 249.88}}, \"total_records\": 4}\n.\n============================== warnings summary ===============================\n.venv\\Lib\\site-packages\\starlette\\testclient.py:40\n  D:\\ODOO\\Auth_gateway\\.venv\\Lib\\site-packages\\starlette\\testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.\n    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1 passed, 1 warning in 2.72s\n",
+      "diagnostics": "D:\\Docker\\auth-gateway\\.venv\\Lib\\site-packages\\pytest_asyncio\\plugin.py:207: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.\nThe event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"\n\n"
+    },
+    "agent": {
+      "test": "tests/unit/test_drive_knowledge.py::test_normal_questions_use_drive_evidence_and_greetings_do_not",
+      "exit_code": 0,
+      "measurements": [
+        "baseline-drive-evidence classification_ms=2.483",
+        "request_id=baseline-drive-evidence stage=internal_retrieval_ms duration_ms=4.834",
+        "request_id=baseline-drive-evidence stage=llm_synthesis_ms duration_ms=0.006"
+      ],
+      "output": "baseline-drive-evidence classification_ms=2.483\nrequest_id=baseline-drive-evidence stage=internal_retrieval_ms duration_ms=4.834\nrequest_id=baseline-drive-evidence stage=llm_synthesis_ms duration_ms=0.006\n.\n1 passed in 3.31s\n",
+      "diagnostics": ""
+    }
+  }
+}

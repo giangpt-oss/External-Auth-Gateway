@@ -19,12 +19,15 @@ WORKDIR /app
 
 # Copy dependency definition and install
 COPY pyproject.toml /app/
+COPY README.md /app/
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir .
 
 # Copy application source code
 COPY app /app/app
 COPY scripts /app/scripts
+COPY alembic.ini /app/
+COPY alembic /app/alembic
 
 # Create data directory with proper permissions for non-root user
 RUN mkdir -p /data && chown -R appuser:appuser /app /data

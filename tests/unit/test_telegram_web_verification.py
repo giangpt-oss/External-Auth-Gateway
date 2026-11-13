@@ -53,7 +53,7 @@ def test_web_verification_binds_only_matching_telegram_id(
         TELEGRAM_WEB_CLIENT_SECRET="test-only",
     )
     app = create_app(settings)
-    monkeypatch.setattr("app.odoo.client.OdooClient.authenticate", lambda *args, **kwargs: 12)
+    monkeypatch.setattr("app.odoo.client.OdooClient.authenticate_password", lambda *args, **kwargs: 12)
 
     expected_telegram_id = "42"
 
@@ -228,7 +228,7 @@ def test_web_verification_cross_domain_callback(temp_db_path, fernet_key, monkey
         TELEGRAM_WEB_CLIENT_SECRET="test-only",
     )
     app = create_app(settings)
-    monkeypatch.setattr("app.odoo.client.OdooClient.authenticate", lambda *args, **kwargs: 12)
+    monkeypatch.setattr("app.odoo.client.OdooClient.authenticate_password", lambda *args, **kwargs: 12)
 
     def execute(self, **kwargs):
         if kwargs["model"] == "hr.employee":

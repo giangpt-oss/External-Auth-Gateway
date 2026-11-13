@@ -40,6 +40,26 @@ def test_workspace_routes_require_service_secret(workspace_env):
     assert response.status_code == 401
 
 
+def test_drive_knowledge_requires_matching_binding_and_exports_native_docs(workspace_env, caplog):
+    client, _, uid, headers = workspace_env
+    path = f"/internal/v1/users/{uid}/workspace/drive-knowledge"
+    payload = {"telegram_user_id": 7, "chat_id": 7, "telegram_binding_id": "binding", "file_id": "file123"}
+    with patch("app.workspace.service.WorkspaceService._send") as send:
+        assert client.post(path, headers=headers, json={**payload, "chat_id": 8}).status_code == 403
+        send.assert_not_called()
+        send.side_effect = [
+            {"id": "file123", "name": "Policy", "mimeType": "application/vnd.google-apps.document",
+             "capabilities": {"canDownload": True}},
+            {"content_base64": "dGVzdA=="},
+        ]
+        with caplog.at_level("INFO", logger="app.workspace.telemetry"):
+            response = client.post(path, headers={**headers, "X-Request-ID": "drive-correlation"}, json=payload)
+    assert response.status_code == 200
+    assert response.json()["files"] == [{"id": "file123", "name": "Policy", "suffix": ".docx", "content_base64": "dGVzdA=="}]
+    assert [call.args[:3] for call in send.call_args_list] == [(uid, "drive", "files.get"), (uid, "drive", "files.export")]
+    assert "req_id=drive-correlation" in caplog.text
+
+
 def test_query_rejects_write_without_google_call(workspace_env):
     client, _, uid, headers = workspace_env
     with patch("app.workspace.service.WorkspaceService._send") as send:

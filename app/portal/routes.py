@@ -119,33 +119,33 @@ def dashboard_page(
             },
             {
                 "id": "calendar",
-                "name": "Google Calendar",
+                "name": "Calendar",
                 "active": is_conn and "calendar" in scopes_str,
                 "icon_svg": '<svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z"/></svg>',
             },
             {
                 "id": "drive",
-                "name": "Google Drive",
+                "name": "Drive",
                 "active": is_conn and "drive" in scopes_str,
                 "icon_svg": '<svg width="20" height="20" viewBox="0 0 24 24"><path fill="#34A853" d="M8.2 16.5l3.8-6.5h7.6l-3.8 6.5z"/><path fill="#FBBC05" d="M12 10l-3.8 6.5L4.4 10h7.6z"/><path fill="#4285F4" d="M15.8 3.5H8.2L4.4 10l3.8 6.5 7.6-13z"/></svg>',
             },
             {
                 "id": "docs",
-                "name": "Google Docs",
+                "name": "Docs",
                 "active": is_conn and any(s in scopes_str for s in ["documents", "docs", "drive"]),
                 "icon_svg": '<svg width="20" height="20" viewBox="0 0 24 24"><path fill="#4285F4" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>',
             },
             {
                 "id": "sheets",
-                "name": "Google Sheets",
+                "name": "Sheets",
                 "active": is_conn and any(s in scopes_str for s in ["spreadsheets", "sheets", "drive"]),
                 "icon_svg": '<svg width="20" height="20" viewBox="0 0 24 24"><path fill="#0F9D58" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-1 16H8v-2h5v2zm0-4H8v-2h5v2zm3 4h-2v-2h2v2zm0-4h-2v-2h2v2zm-3-5V3.5L18.5 9H13z"/></svg>',
             },
             {
-                "id": "meet",
-                "name": "Google Meet",
-                "active": is_conn and "calendar" in scopes_str,
-                "icon_svg": '<svg width="20" height="20" viewBox="0 0 24 24"><path fill="#00832d" d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>',
+                "id": "slides",
+                "name": "Slides",
+                "active": is_conn and any(s in scopes_str for s in ["presentations", "drive"]),
+                "icon_svg": '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F9AB00" stroke-width="2"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 10h8M8 14h5"/></svg>',
             },
         ]
 

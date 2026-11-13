@@ -11,6 +11,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.workspace.catalog import build_url, catalog, is_authorized, validate_call
+from app.workspace.google_mcp import GoogleMcpError, call_tool, translate
+
+from app.workspace.telemetry import measure_stage
+from app.workspace.network_slots import outbound_slot
 
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 
@@ -26,11 +30,13 @@ def digest(value):
 
 
 class WorkspaceService:
-    def __init__(self, google_client, signing_key, transport=None):
+    def __init__(self, google_client, signing_key, transport=None, *, use_mcp=False):
         self.google = google_client
         self.key = signing_key.encode()
         self.transport = transport
+        self.use_mcp = use_mcp
 
+    @measure_stage("permission_check_ms")
     def authorize(self, user_id, service, method):
         connection = self.google.get_user_google_connection(user_id)
         if not connection or connection.status == "disconnected":
@@ -96,7 +102,18 @@ class WorkspaceService:
             raise ValueError("Invalid MIME type")
         return data
 
-    def _send(self, user_id, service, spec, params, body, media=None):
+    def _send(self, user_id, service, method, spec, params, body, media=None):
+        mcp_call = translate(service, method, params, body, media) if self.use_mcp else None
+        if mcp_call:
+            token = self.google.oauth_service.get_valid_access_token(user_id)
+            try:
+                with outbound_slot(user_id, write=spec["kind"] == "write"), measure_stage("external_call_ms", protocol="mcp"):
+                    return call_tool(service, token, *mcp_call, transport=self.transport)
+            except GoogleMcpError as exc:
+                code = {401: "RECONNECT_REQUIRED", 403: "PERMISSION_DENIED", 429: "RATE_LIMIT"}.get(
+                    exc.status_code, "UNKNOWN_RESULT" if spec["kind"] == "write" else "SERVICE_ERROR"
+                )
+                raise WorkspaceError(code, "Google Workspace MCP không trả kết quả thành công.") from exc
         url = build_url(service, spec, params, upload=media is not None)
         host = urlsplit(url).hostname or ""
         if urlsplit(url).scheme != "https" or not (host == "www.googleapis.com" or host.endswith(".googleapis.com")):
@@ -116,7 +133,7 @@ class WorkspaceService:
             kwargs["json"] = body
         try:
             with httpx.Client(timeout=9.0, follow_redirects=False, transport=self.transport) as client:
-                with client.stream(spec["httpMethod"], url, **kwargs) as response:
+                with outbound_slot(user_id, write=spec["kind"] == "write"), measure_stage("external_call_ms", protocol="rest"), client.stream(spec["httpMethod"], url, **kwargs) as response:
                     raw = bytearray()
                     for chunk in response.iter_bytes():
                         raw.extend(chunk)
@@ -141,7 +158,7 @@ class WorkspaceService:
     def read(self, user_id, service, payload):
         spec, params, body = self._normalize(service, "read", payload)
         self.authorize(user_id, service, payload["method"])
-        return {"status": "OK", "data": self._send(user_id, service, spec, params, body)}
+        return {"status": "OK", "data": self._send(user_id, service, payload["method"], spec, params, body)}
 
     def _snapshot(self, user_id, service, method, params):
         candidate = method.rsplit(".", 1)[0] + ".get"
@@ -156,7 +173,7 @@ class WorkspaceService:
             snapshot_params.setdefault("personFields", "names,emailAddresses,phoneNumbers,metadata")
         self.authorize(user_id, service, candidate)
         spec, snapshot_params, body = validate_call(service, "read", candidate, snapshot_params, {})
-        data = self._send(user_id, service, spec, snapshot_params, body)
+        data = self._send(user_id, service, candidate, spec, snapshot_params, body)
         return {"method": candidate, "parameters": snapshot_params, "hash": digest(data), "revision_id": data.get("revisionId") if isinstance(data, dict) else None}
 
     def _sign(self, payload):
@@ -212,4 +229,4 @@ class WorkspaceService:
                 raise WorkspaceError("CONFLICT", "Dữ liệu đã đổi từ lúc xem trước. Vui lòng tạo yêu cầu mới.")
             if service in {"docs", "slides"} and snapshot.get("revision_id"):
                 body = {**body, "writeControl": {"requiredRevisionId": snapshot["revision_id"]}}
-        return {"status": "OK", "data": self._send(user_id, service, spec, params, body, payload.get("media"))}
+        return {"status": "OK", "data": self._send(user_id, service, payload["method"], spec, params, body, payload.get("media"))}

@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import sessionmaker
 
 from app.models import OdooCredential, Session, User
-from app.odoo.client import OdooClient
+from app.odoo.client import OdooAccessError, OdooClient
 from app.security import decrypt_secret, encrypt_secret, generate_secure_token, hash_token
 
 
@@ -93,14 +93,16 @@ class AuthService:
         self,
         login: str,
         secret: str,
-        credential_kind: str = "api_key",
+        credential_kind: str = "password",
         client_ip: str = "127.0.0.1",
     ) -> tuple[AuthenticatedUser, str, str]:
         login = login.strip()
         self._check_rate_limit(client_ip, login)
 
         try:
-            uid = self.odoo_client.authenticate(login, secret)
+            if credential_kind != "password":
+                raise AuthError("Odoo account password is required.")
+            uid = self.odoo_client.authenticate_password(login, secret)
         except Exception:
             self._record_failed_attempt(client_ip, login)
             raise
@@ -120,6 +122,9 @@ class AuthService:
                 self._record_failed_attempt(client_ip, login)
                 raise AuthError("Failed to fetch user profile from Odoo.")
             profile = records[0]
+        except OdooAccessError as exc:
+            self._record_failed_attempt(client_ip, login)
+            raise AuthError("Odoo denied access to the user profile.") from exc
         except Exception:
             self._record_failed_attempt(client_ip, login)
             raise

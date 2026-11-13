@@ -27,7 +27,7 @@ def auth_components(temp_db_path, fernet_key):
 
 def test_login_success_active_internal_user(auth_components, fernet_key):
     service, mock_odoo, session_factory = auth_components
-    mock_odoo.authenticate.return_value = 101
+    mock_odoo.authenticate_password.return_value = 101
     mock_odoo.execute.return_value = [
         {
             "id": 101,
@@ -43,7 +43,6 @@ def test_login_success_active_internal_user(auth_components, fernet_key):
     auth_user, session_token, csrf_secret = service.login(
         login="a.nguyen@company.com",
         secret="secret123",
-        credential_kind="api_key",
         client_ip="127.0.0.1",
     )
 
@@ -58,13 +57,13 @@ def test_login_success_active_internal_user(auth_components, fernet_key):
         assert user is not None
         cred = db.query(OdooCredential).filter_by(user_id=user.id).first()
         assert cred is not None
-        assert cred.credential_kind == "api_key"
+        assert cred.credential_kind == "password"
         assert decrypt_secret(cred.encrypted_secret, fernet_key) == "secret123"
 
 
 def test_login_rejects_portal_user(auth_components):
     service, mock_odoo, _ = auth_components
-    mock_odoo.authenticate.return_value = 102
+    mock_odoo.authenticate_password.return_value = 102
     mock_odoo.execute.return_value = [
         {
             "id": 102,
@@ -88,7 +87,7 @@ def test_login_rejects_portal_user(auth_components):
 
 def test_login_rejects_inactive_user(auth_components):
     service, mock_odoo, _ = auth_components
-    mock_odoo.authenticate.return_value = 103
+    mock_odoo.authenticate_password.return_value = 103
     mock_odoo.execute.return_value = [
         {
             "id": 103,
@@ -112,7 +111,7 @@ def test_login_rejects_inactive_user(auth_components):
 
 def test_login_rate_limiting(auth_components):
     service, mock_odoo, _ = auth_components
-    mock_odoo.authenticate.side_effect = OdooAuthError("Invalid credentials")
+    mock_odoo.authenticate_password.side_effect = OdooAuthError("Invalid credentials")
 
     # 5 failed attempts
     for _ in range(5):

@@ -67,10 +67,10 @@ Tạo cronjob hàng ngày trên máy chủ để định kỳ sao lưu:
 
 ## 3. Xử lý các tình huống sự cố thường gặp
 
-### 3.1. API Key Odoo của nhân viên hết hạn hoặc bị thu hồi
+### 3.1. Thông tin xác thực Odoo của nhân viên hết hiệu lực
 - **Hiện tượng**: Log ghi nhận `OdooAuthError` khi đồng bộ lịch hoặc tra cứu CRM.
 - **Hành vi hệ thống**: Gateway tự động dừng tác vụ đồng bộ lịch và nhắc họp của nhân viên đó.
-- **Cách xử lý**: Nhân viên chỉ cần đăng nhập lại vào Cổng Portal bằng API Key mới. Credential mới sẽ tự động được mã hóa và cập nhật, các tác vụ nền sẽ khôi phục bình thường.
+- **Cách xử lý**: Nhân viên đăng nhập lại vào Portal bằng tài khoản và mật khẩu Odoo hiện tại. Gateway mã hóa và cập nhật thông tin xác thực dùng cho các tác vụ nền.
 
 ### 3.2. Google OAuth Token bị thu hồi (`invalid_grant`)
 - **Hiện tượng**: Job refresh token trả về lỗi `invalid_grant` (do user đổi mật khẩu Google hoặc thu hồi quyền truy cập).
@@ -106,3 +106,35 @@ Trong trường hợp cần ngừng thử nghiệm hoặc tháo gỡ Gateway:
    - Tất cả các sự kiện đã tạo trên Google Calendar và Odoo Calendar đều là các bản ghi độc lập hợp lệ.
    - Khi Gateway dừng lại, nhân viên vẫn xem và sử dụng lịch bình thường trên cả hai hệ thống mà không bị mất mát dữ liệu.
 3. Giữ nguyên volume `/data` và file `.env` nếu có kế hoạch kích hoạt lại sau đó.
+# Workspace workers với PostgreSQL 16
+
+`compose.yaml` chạy cấu hình SQLite cục bộ với một Workspace worker trong Gateway.
+Để chạy thử cấu hình PostgreSQL trên database mới, đặt `WORKSPACE_POSTGRES_PASSWORD`
+và `WORKSPACE_POSTGRES_URL` trong `.env`. URL dùng hostname `postgres`, tài khoản
+`gateway`, database `gateway` và mật khẩu đã mã hóa URL nếu có ký tự đặc biệt.
+
+```powershell
+docker compose -f compose.yaml -f compose.postgres.yaml up --build gateway workspace-worker drive-indexer
+```
+
+Compose chờ PostgreSQL sẵn sàng và bước `migrate` hoàn tất trước khi chạy Gateway
+hai worker tương tác và một worker tải tệp Drive nền. Database mới lấy schema hiện tại và ghi revision Alembic. Database
+đã có revision được nâng cấp qua Alembic. Database có dữ liệu nhưng chưa có revision
+cần kiểm tra schema trước khi tiếp nhận. Lệnh trên tạo PostgreSQL riêng và không
+nhập dữ liệu SQLite. Dùng môi trường thử hoặc bản sao đã kiểm tra trước khi đổi
+database của hệ thống đang chạy.
+
+Worker gia hạn lease mỗi 15 giây. Nếu lease hết hạn, worker khác được nhận lại
+tác vụ đọc trong deadline gốc. Tác vụ ghi có thể đã gửi được chuyển sang
+`unknown_result`. Callback được lưu cùng kết quả và thử lại sau 30 giây khi giao lỗi.
+
+Khi Gateway có `ENABLE_AI_AGENT_FORWARDING=true` và Agent kết nối được với Gateway,
+đặt `WORKSPACE_BACKGROUND_READS=true` ở Agent để đưa các lệnh đọc công cụ Workspace
+vào hàng đợi. Sau khi xác minh liên kết, Agent định dạng kết quả, lưu lịch sử theo
+`job_id` và trả nội dung cho Gateway. Gateway đưa nội dung vào hàng đợi Telegram
+hiện có và kiểm tra lại người nhận trước khi gửi.
+
+Worker Drive nhận tác vụ `action=index`, `service=drive`, `operation=index.fetch`
+với `parameters.fileId`. Đây là đơn vị tải một tệp có thể tiếp quản sau khi worker
+mất lease. Quét danh sách, checkpoint đồng bộ và parse/embedding được triển khai
+ở giai đoạn 4.

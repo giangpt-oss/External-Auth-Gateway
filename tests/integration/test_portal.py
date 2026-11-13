@@ -74,7 +74,10 @@ def test_portal_login_page_renders_form(portal_client):
     assert res.status_code == 200
     assert "Cổng Xác Thực & Đồng Bộ" in res.text
     assert 'name="csrf_token"' in res.text
-    assert "Email Odoo" in res.text
+    assert "Tài khoản Odoo" in res.text
+    assert "Mật khẩu Odoo" in res.text
+    assert 'name="credential_kind"' not in res.text
+    assert "API Key" not in res.text
 
 
 def test_portal_dashboard_requires_login(portal_client):
@@ -88,7 +91,7 @@ def test_portal_dashboard_requires_login(portal_client):
 def test_portal_dashboard_renders_authenticated_user(portal_client):
     client, session_factory = portal_client
     mock_odoo = MagicMock()
-    mock_odoo.authenticate.return_value = 77
+    mock_odoo.authenticate_password.return_value = 77
     mock_odoo.execute.return_value = [
         {
             "id": 77,
@@ -116,7 +119,6 @@ def test_portal_dashboard_renders_authenticated_user(portal_client):
         data={
             "login": "portal_user@company.com",
             "secret": "valid_secret",
-            "credential_kind": "api_key",
             "csrf_token": csrf_token,
         },
         headers={"Accept": "text/html"},
@@ -130,12 +132,15 @@ def test_portal_dashboard_renders_authenticated_user(portal_client):
     # Should see conflict and ambiguous section
     assert "Xung đột lịch cần xử lý" in login_res.text
     assert "Lịch chờ đối soát" in login_res.text
+    with session_factory() as db:
+        user = db.query(User).filter_by(odoo_uid=77).one()
+        assert db.query(OdooCredential).filter_by(user_id=user.id).one().credential_kind == "password"
 
 
 def test_calendar_sync_csrf_validation(portal_client):
     client, session_factory = portal_client
     mock_odoo = MagicMock()
-    mock_odoo.authenticate.return_value = 77
+    mock_odoo.authenticate_password.return_value = 77
     mock_odoo.execute.return_value = [
         {
             "id": 77,
@@ -159,7 +164,6 @@ def test_calendar_sync_csrf_validation(portal_client):
         data={
             "login": "portal_user@company.com",
             "secret": "valid_secret",
-            "credential_kind": "api_key",
             "csrf_token": csrf_match.group(1),
         },
         headers={"Accept": "text/html"},
@@ -196,7 +200,7 @@ def test_calendar_sync_csrf_validation(portal_client):
 def test_portal_telegram_disconnect_html_redirect(portal_client, temp_db_path):
     client, session_factory = portal_client
     mock_odoo = MagicMock()
-    mock_odoo.authenticate.return_value = 77
+    mock_odoo.authenticate_password.return_value = 77
     mock_odoo.execute.return_value = [
         {
             "id": 77,
@@ -234,7 +238,6 @@ def test_portal_telegram_disconnect_html_redirect(portal_client, temp_db_path):
         data={
             "login": "portal_user@company.com",
             "secret": "valid_secret",
-            "credential_kind": "api_key",
             "csrf_token": csrf_match.group(1),
         },
         headers={"Accept": "text/html"},

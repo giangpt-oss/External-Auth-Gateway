@@ -1,10 +1,11 @@
 import base64
+import json
 from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from app.workspace.catalog import catalog
+from app.workspace.catalog import SERVICES, catalog
 
 
 def make_service(handler, scopes=None):
@@ -136,6 +137,81 @@ def test_all_discovery_schemas_are_valid_jsonschema():
     from jsonschema import Draft7Validator
 
     from app.workspace.catalog import request_schema
-    for service, spec in catalog().items():
+    for service in SERVICES:
+        spec = catalog()[service]
         for method in spec["methods"]:
             Draft7Validator.check_schema(request_schema(service, method))
+
+def test_docs_read_routes_through_google_mcp():
+    def handler(request):
+        assert request.url.host == "docsmcp.googleapis.com"
+        assert request.url.path == "/mcp/v1"
+        assert request.headers["Authorization"] == "Bearer private-test-token"
+        call = json.loads(request.content)
+        assert call["method"] == "tools/call"
+        assert call["params"] == {
+            "name": "read_doc", "arguments": {"documentId": "doc1"}
+        }
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0",
+            "id": call["id"],
+            "result": {"structuredContent": {"content": {"title": "Report"}}},
+        })
+
+    service = make_service(handler)
+    service.use_mcp = True
+    assert service.read(1, "docs", {
+        "method": "documents.get", "parameters": {"documentId": "doc1"}
+    })["data"] == {"title": "Report"}
+
+
+def test_docs_mcp_mutation_requires_confirmation_and_keeps_revision():
+    calls = []
+
+    def handler(request):
+        call = json.loads(request.content)
+        calls.append(call["params"])
+        if call["params"]["name"] == "read_doc":
+            data = {"content": {"documentId": "doc1", "revisionId": "rev1"}}
+        else:
+            assert call["params"]["arguments"]["writeControl"] == {"requiredRevisionId": "rev1"}
+            data = {"documentId": "doc1"}
+        message = {"jsonrpc": "2.0", "id": call["id"], "result": {"structuredContent": data}}
+        return httpx.Response(
+            200, text=f"event: message\ndata: {json.dumps(message)}\n\n",
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    service = make_service(handler)
+    service.use_mcp = True
+    preview = service.prepare(1, "docs", {
+        "method": "documents.batchUpdate",
+        "parameters": {"documentId": "doc1"},
+        "body": {"requests": [{"insertText": {"endOfSegmentLocation": {}, "text": "Hello"}}]},
+    })
+    assert [call["name"] for call in calls] == ["read_doc"]
+    assert service.execute(1, "docs", preview["arguments"])["data"] == {"documentId": "doc1"}
+    assert [call["name"] for call in calls] == ["read_doc", "read_doc", "update_doc"]
+
+
+@pytest.mark.parametrize(("service_name", "method", "parameters", "scope", "tool"), [
+    ("gmail", "users.threads.list", {"q": "is:unread"}, "gmail.readonly", "search_threads"),
+    ("calendar", "events.list", {"calendarId": "primary"}, "calendar.events", "list_events"),
+    ("drive", "files.list", {"q": "trashed=false"}, "drive.readonly", "search_files"),
+    ("sheets", "spreadsheets.values.get", {"spreadsheetId": "id", "range": "A1"}, "spreadsheets.readonly", "get_values"),
+    ("slides", "presentations.get", {"presentationId": "id"}, "presentations.readonly", "read_presentation"),
+])
+def test_supported_workspace_reads_call_google_mcp(service_name, method, parameters, scope, tool):
+    def handler(request):
+        call = json.loads(request.content)
+        assert request.url.host == f"{service_name}mcp.googleapis.com"
+        assert call["params"]["name"] == tool
+        data = {"content": {"title": "Report"}} if service_name == "slides" else {}
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0", "id": call["id"],
+            "result": {"content": [{"type": "text", "text": json.dumps(data)}]},
+        })
+
+    service = make_service(handler, [f"https://www.googleapis.com/auth/{scope}"])
+    service.use_mcp = True
+    assert service.read(1, service_name, {"method": method, "parameters": parameters})["status"] == "OK"

@@ -18,6 +18,8 @@ from app.security import (
     hash_token,
 )
 from app.workspace.catalog import oauth_scopes
+from app.workspace.telemetry import measure_stage
+from app.workspace.network_slots import outbound_slot
 
 
 class GoogleOAuthError(Exception):
@@ -41,6 +43,9 @@ class GoogleAuthRevokedError(GoogleOAuthError):
 
 
 class GoogleOAuthService:
+    _user_locks: dict[tuple[int, int], threading.Lock] = {}
+    _global_lock = threading.Lock()
+
     AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
     TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
     REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
@@ -71,14 +76,13 @@ class GoogleOAuthService:
         self.redirect_uri = redirect_uri
         self.encryption_key = encryption_key
         self.allowed_domains = allowed_domains or []
-        self._user_locks: dict[int, threading.Lock] = {}
-        self._global_lock = threading.Lock()
 
     def _get_user_lock(self, user_id: int) -> threading.Lock:
         with self._global_lock:
-            if user_id not in self._user_locks:
-                self._user_locks[user_id] = threading.Lock()
-            return self._user_locks[user_id]
+            key = (id(self.session_factory), user_id)
+            if key not in self._user_locks:
+                self._user_locks[key] = threading.Lock()
+            return self._user_locks[key]
 
     def _encrypt(self, text: str | None) -> str | None:
         if not text:
@@ -255,7 +259,7 @@ class GoogleOAuthService:
                 db.add(conn)
             db.commit()
 
-    def get_valid_access_token(self, user_id: int) -> str:
+    def get_valid_access_token(self, user_id: int, force_refresh: bool = False) -> str:
         lock = self._get_user_lock(user_id)
         with lock:
             now = datetime.now(UTC)
@@ -266,8 +270,8 @@ class GoogleOAuthService:
                         "Google connection is missing or not in connected status."
                     )
 
-                # If token still valid for more than 5 minutes, return it
-                if ensure_utc(conn.expires_at) > now + timedelta(minutes=5):
+                # If token still valid for more than 5 minutes and not force_refresh, return it
+                if not force_refresh and ensure_utc(conn.expires_at) > now + timedelta(minutes=5):
                     return self._decrypt(conn.encrypted_access_token)
 
                 refresh_token = self._decrypt(conn.encrypted_refresh_token)
@@ -284,7 +288,8 @@ class GoogleOAuthService:
                 "grant_type": "refresh_token",
             }
             try:
-                resp = httpx.post(self.TOKEN_ENDPOINT, data=refresh_data, timeout=20.0)
+                with outbound_slot(user_id), measure_stage("token_refresh_ms"):
+                    resp = httpx.post(self.TOKEN_ENDPOINT, data=refresh_data, timeout=20.0)
                 data = resp.json()
             except Exception as e:
                 raise GoogleOAuthError(f"Network error refreshing Google token: {e}") from e

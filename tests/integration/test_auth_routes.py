@@ -19,7 +19,7 @@ def test_auth_routes_login_me_logout(temp_db_path, fernet_key):
     client = TestClient(app)
 
     with (
-        patch("app.odoo.client.OdooClient.authenticate") as mock_auth,
+        patch("app.odoo.client.OdooClient.authenticate_password") as mock_auth,
         patch("app.odoo.client.OdooClient.execute") as mock_exec,
     ):
         mock_auth.return_value = 55
@@ -35,8 +35,7 @@ def test_auth_routes_login_me_logout(temp_db_path, fernet_key):
             }
         ]
 
-        # 1. Login
-        login_res = client.post(
+        rejected = client.post(
             "/auth/login",
             data={
                 "login": "b.tran@company.com",
@@ -44,7 +43,20 @@ def test_auth_routes_login_me_logout(temp_db_path, fernet_key):
                 "credential_kind": "api_key",
             },
         )
+        assert rejected.status_code == 401
+        assert "session_id" not in rejected.cookies
+        mock_auth.assert_not_called()
+
+        # 1. Login
+        login_res = client.post(
+            "/auth/login",
+            data={
+                "login": "b.tran@company.com",
+                "secret": "odoo_password",
+            },
+        )
         assert login_res.status_code == 200
+        mock_auth.assert_called_once_with("b.tran@company.com", "odoo_password")
         data = login_res.json()
         assert data["user"]["odoo_uid"] == 55
         assert data["user"]["name"] == "Tran Thi B"

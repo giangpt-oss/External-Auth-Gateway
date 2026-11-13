@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from jsonschema import Draft7Validator, ValidationError
 
-SERVICES = ("gmail", "calendar", "drive", "docs", "sheets", "slides", "tasks", "contacts", "chat", "meet")
+SERVICES = ("gmail", "calendar", "drive", "docs", "sheets", "slides")
 MAX_PAYLOAD = 1024 * 1024
 
 

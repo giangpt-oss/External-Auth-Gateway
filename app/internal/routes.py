@@ -601,7 +601,10 @@ def execute_user_action(
                 return {'status': 'in_progress', 'message': 'Đã nhận xác nhận, đang tạo báo giá trong nền.', 'operation_id': req.operation_id}
             if req.action.startswith("workspace."):
                 service_name = req.action.split(".")[1]
-                result = WorkspaceService(_get_google_client(request), settings.ENCRYPTION_KEY).execute(user_id, service_name, args)
+                result = WorkspaceService(
+                    _get_google_client(request), settings.ENCRYPTION_KEY,
+                    use_mcp=settings.GOOGLE_WORKSPACE_MCP_ENABLED,
+                ).execute(user_id, service_name, args)
                 final_res = {"status": "completed", "result": result["data"]}
                 op.status = "completed"
                 op.result_json = json.dumps(final_res, ensure_ascii=False)

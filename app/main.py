@@ -29,6 +29,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report_worker = None
         quote_worker = None
         quote_execution_worker = None
+        workspace_worker = None
         if settings.ENABLE_QUOTATIONS and settings.APP_ENV != 'test':
             from app.quotations.jobs import QuotePreparationWorker
             quote_worker = QuotePreparationWorker(settings, session_factory)
@@ -40,6 +41,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from app.reporting.worker import ReportWorker
             report_worker = ReportWorker(settings, session_factory)
             report_worker.start()
+
+        if settings.APP_ENV != "test" and settings.WORKSPACE_EMBEDDED_WORKER:
+            from app.workspace.worker import WorkspaceWorker
+            workspace_worker = WorkspaceWorker(settings, session_factory)
+            workspace_worker.start()
 
         scheduler = None
         ai_worker = None
@@ -166,6 +172,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             quote_worker.stop()
         if quote_execution_worker:
             quote_execution_worker.stop()
+        if workspace_worker:
+            await workspace_worker.stop()
         if poller_stop_event:
             poller_stop_event.set()
         if ai_worker:
@@ -183,6 +191,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
+
+    from app.workspace.network_slots import NetworkSlots, network_slots, outbound_user_id
+
+    gateway_slots = NetworkSlots(engine)
+
+    @app.middleware("http")
+    async def workspace_network_limits(request, call_next):
+        token = network_slots.set(gateway_slots)
+        parts = request.url.path.split("/")
+        owner = parts[4] if parts[:4] == ["", "internal", "v1", "users"] and len(parts) > 4 else ""
+        owner_token = outbound_user_id.set(int(owner) if owner.isascii() and owner.isdecimal() and len(owner) <= 19 else None)
+        try:
+            return await call_next(request)
+        finally:
+            outbound_user_id.reset(owner_token)
+            network_slots.reset(token)
 
     def get_db() -> Session:
         db = session_factory()

@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+import respx
 
 from app.odoo.client import (
     OdooAccessError,
@@ -8,6 +10,51 @@ from app.odoo.client import (
     OdooClient,
     OdooNetworkError,
 )
+
+
+@respx.mock
+def test_authenticate_password_uses_odoo_web_login():
+    client = OdooClient(url="https://test.odoo.com", db="test_db")
+    route = respx.post(
+        "https://test.odoo.com/web/session/authenticate",
+        json={
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {"db": "test_db", "login": "user@example.com", "password": "password"},
+        },
+    ).respond(json={"result": {"uid": 42}})
+
+    assert client.authenticate_password("user@example.com", "password") == 42
+    assert route.called
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error": {"data": {"name": "odoo.exceptions.AccessDenied"}}},
+        {"result": {"uid": None}},
+    ],
+)
+@respx.mock
+def test_authenticate_password_rejects_unsuccessful_web_login(body):
+    client = OdooClient(url="https://test.odoo.com", db="test_db")
+    respx.post("https://test.odoo.com/web/session/authenticate").respond(json=body)
+
+    with patch.object(client, "authenticate") as rpc_auth:
+        with pytest.raises(OdooAuthError):
+            client.authenticate_password("user@example.com", "rejected-secret")
+        rpc_auth.assert_not_called()
+
+
+@respx.mock
+def test_authenticate_password_handles_network_error():
+    client = OdooClient(url="https://test.odoo.com", db="test_db")
+    respx.post("https://test.odoo.com/web/session/authenticate").mock(
+        side_effect=httpx.ReadTimeout("timed out")
+    )
+
+    with pytest.raises(OdooNetworkError):
+        client.authenticate_password("user@example.com", "password")
 
 
 def test_odoo_client_authenticate_success():

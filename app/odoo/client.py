@@ -4,6 +4,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from app.workspace.network_slots import outbound_slot, outbound_user_id
 
 
 class OdooError(Exception):
@@ -115,6 +116,31 @@ class OdooClient:
                 raise OdooAuthError(f"Access Denied: {e.faultString}") from e
             raise OdooError(f"Odoo RPC Fault: {e.faultString}") from e
 
+    def authenticate_password(self, login: str, password: str) -> int:
+        """Use Odoo's interactive login, which validates the account password."""
+        try:
+            response = httpx.post(
+                f"{self.url}/web/session/authenticate",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "call",
+                    "params": {"db": self.db, "login": login, "password": password},
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise OdooNetworkError("Failed to connect to Odoo web login.") from exc
+
+        if not isinstance(body, dict):
+            raise OdooNetworkError("Invalid response from Odoo web login.")
+        result = body.get("result")
+        uid = result.get("uid") if isinstance(result, dict) else None
+        if "error" in body or type(uid) is not int or uid <= 0:
+            raise OdooAuthError("Odoo did not complete password authentication.")
+        return uid
+
     def execute(
         self,
         uid: int,
@@ -127,7 +153,11 @@ class OdooClient:
         kwargs = kwargs or {}
         try:
             models = self._get_proxy("object")
-            return models.execute_kw(self.db, uid, secret, model, method, args, kwargs)
+            read_methods = {"read", "search", "search_read", "search_count", "fields_get",
+                            "read_group", "name_search", "name_get", "check_access_rights",
+                            "check_access_rule", "default_get", "has_group"}
+            with outbound_slot(outbound_user_id.get(), write=method not in read_methods):
+                return models.execute_kw(self.db, uid, secret, model, method, args, kwargs)
         except (TimeoutError, ConnectionError, OSError) as e:
             raise OdooNetworkError(f"Network error during Odoo call: {e}") from e
         except xmlrpc.client.Fault as e:

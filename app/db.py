@@ -8,6 +8,23 @@ from sqlalchemy.orm import sessionmaker
 from app.models import Base
 
 
+def normalize_db_url(db_url: str) -> str:
+    if db_url.startswith("postgresql://"):
+        return db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return db_url
+
+
+def create_postgres_engine(db_url: str) -> Engine:
+    normalized_url = normalize_db_url(db_url)
+    return create_engine(
+        normalized_url,
+        pool_pre_ping=True,
+        pool_size=20,
+        max_overflow=10,
+        pool_recycle=1800,
+    )
+
+
 def create_sqlite_engine(db_url: str) -> Engine:
     # Ensure directory exists for file-based sqlite
     if db_url.startswith("sqlite:///") and not db_url.startswith("sqlite:///:memory:"):
@@ -34,17 +51,25 @@ def create_sqlite_engine(db_url: str) -> Engine:
     return engine
 
 
+def create_app_engine(db_url: str) -> Engine:
+    normalized_url = normalize_db_url(db_url)
+    if normalized_url.startswith("sqlite"):
+        return create_sqlite_engine(normalized_url)
+    return create_postgres_engine(normalized_url)
+
+
 def init_db(db_url: str) -> tuple[Engine, sessionmaker]:
-    engine = create_sqlite_engine(db_url)
+    engine = create_app_engine(db_url)
     Base.metadata.create_all(bind=engine)
-    # Migration check for TelegramUpdate
-    from sqlalchemy import text
+
+    from sqlalchemy import inspect, text
 
     with engine.connect() as conn:
         try:
-            res = conn.execute(text("PRAGMA table_info(telegram_updates)"))
-            cols = [r[1] for r in res.fetchall()]
-            if cols:
+            insp = inspect(conn)
+            table_names = set(insp.get_table_names())
+            if "telegram_updates" in table_names:
+                cols = {c["name"] for c in insp.get_columns("telegram_updates")}
                 if "ai_response" not in cols:
                     conn.execute(text("ALTER TABLE telegram_updates ADD COLUMN ai_response TEXT"))
                 if "delivery_status" not in cols:
@@ -65,10 +90,10 @@ def init_db(db_url: str) -> tuple[Engine, sessionmaker]:
                     )
                 if "lease_expires_at" not in cols:
                     conn.execute(
-                        text("ALTER TABLE telegram_updates ADD COLUMN lease_expires_at DATETIME")
+                        text("ALTER TABLE telegram_updates ADD COLUMN lease_expires_at TIMESTAMP")
                     )
                 if "retry_at" not in cols:
-                    conn.execute(text("ALTER TABLE telegram_updates ADD COLUMN retry_at DATETIME"))
+                    conn.execute(text("ALTER TABLE telegram_updates ADD COLUMN retry_at TIMESTAMP"))
                 if "last_error" not in cols:
                     conn.execute(text("ALTER TABLE telegram_updates ADD COLUMN last_error TEXT"))
                 if "claim_token" not in cols:
@@ -83,17 +108,18 @@ def init_db(db_url: str) -> tuple[Engine, sessionmaker]:
                     )
                 if "updated_at" not in cols:
                     conn.execute(
-                        text("ALTER TABLE telegram_updates ADD COLUMN updated_at DATETIME")
+                        text("ALTER TABLE telegram_updates ADD COLUMN updated_at TIMESTAMP")
                     )
-            conn.commit()
+                conn.commit()
         except Exception:
             pass
 
         try:
             import secrets
-            res = conn.execute(text("PRAGMA table_info(telegram_connections)"))
-            cols = [r[1] for r in res.fetchall()]
-            if cols:
+            insp = inspect(conn)
+            table_names = set(insp.get_table_names())
+            if "telegram_connections" in table_names:
+                cols = {c["name"] for c in insp.get_columns("telegram_connections")}
                 if "binding_id" not in cols:
                     conn.execute(text("ALTER TABLE telegram_connections ADD COLUMN binding_id VARCHAR(64)"))
                 res_null = conn.execute(text("SELECT id FROM telegram_connections WHERE binding_id IS NULL"))
@@ -103,18 +129,34 @@ def init_db(db_url: str) -> tuple[Engine, sessionmaker]:
                         text("UPDATE telegram_connections SET binding_id = :bid WHERE id = :cid"),
                         {"bid": new_bid, "cid": row[0]},
                     )
-            conn.commit()
+                conn.commit()
         except Exception:
             pass
 
         try:
-            res_op = conn.execute(text("PRAGMA table_info(action_operations)"))
-            op_cols = [r[1] for r in res_op.fetchall()]
-            if op_cols and "telegram_binding_id" not in op_cols:
-                conn.execute(text("ALTER TABLE action_operations ADD COLUMN telegram_binding_id VARCHAR(64)"))
-                conn.commit()
+            insp = inspect(conn)
+            table_names = set(insp.get_table_names())
+            if "action_operations" in table_names:
+                op_cols = {c["name"] for c in insp.get_columns("action_operations")}
+                if "telegram_binding_id" not in op_cols:
+                    conn.execute(text("ALTER TABLE action_operations ADD COLUMN telegram_binding_id VARCHAR(64)"))
+                    conn.commit()
         except Exception:
             pass
+
+    if engine.dialect.name == "sqlite":
+        with engine.begin() as conn:
+            columns = {column["name"] for column in inspect(conn).get_columns("workspace_jobs")}
+            for name in ("callback_retry_at", "callback_delivered_at"):
+                if name not in columns:
+                    conn.execute(text(f"ALTER TABLE workspace_jobs ADD COLUMN {name} TIMESTAMP"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_workspace_jobs_callback_retry_at "
+                              "ON workspace_jobs (callback_retry_at)"))
+            indexes = {index["name"]: index for index in inspect(conn).get_indexes("workspace_jobs")}
+            request_index = indexes.get("ix_workspace_jobs_user_request")
+            if request_index is not None and not request_index["unique"]:
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_workspace_jobs_user_request "
+                                  "ON workspace_jobs (user_id, request_id)"))
 
     session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return engine, session_factory

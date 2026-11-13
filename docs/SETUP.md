@@ -6,19 +6,15 @@ Tài liệu hướng dẫn từng bước chuẩn bị và cấu hình tích h�
 
 ## 1. Cấu hình Odoo Online Enterprise 19.3
 
-Hệ thống kết nối trực tiếp qua chuẩn XML-RPC của Odoo (`common` và `object/execute_kw`). **Tuyệt đối không cần cài đặt bất kỳ addon hay chỉnh sửa code trên Odoo.**
+Gateway xác thực mật khẩu qua endpoint đăng nhập web của Odoo và đọc, đồng bộ dữ liệu qua XML-RPC. **Tuyệt đối không cần cài đặt bất kỳ addon hay chỉnh sửa code trên Odoo.**
 
 ### 1.1. Lấy thông tin cơ bản
 - **Odoo URL**: Địa chỉ tenant HTTPS của công ty, ví dụ: `https://mycompany.odoo.com`.
 - **Database Name**: Tên database Odoo Online (thường trùng với subdomain tenant, ví dụ: `mycompany`).
 
-### 1.2. Tạo API Key cá nhân cho nhân viên
-1. Đăng nhập vào Odoo bằng tài khoản nhân viên.
-2. Nhấp vào ảnh đại diện góc trên bên phải &rarr; chọn **Preferences** (hoặc **Tùy chọn**).
-3. Chuyển sang tab **Account Security** (Bảo mật tài khoản).
-4. Tìm mục **Developer API Keys** &rarr; nhấp vào **New API Key**.
-5. Đặt tên (ví dụ: `External Gateway`), nhập lại mật khẩu tài khoản và sao chép mã khóa được sinh ra.
-6. Sử dụng API Key này để đăng nhập vào External Auth Gateway.
+### 1.2. Đăng nhập bằng tài khoản Odoo
+
+Nhân viên nhập tài khoản và mật khẩu Odoo vào External Auth Gateway. Tài khoản cần có mật khẩu trên cơ sở dữ liệu Odoo đã cấu hình và được phép truy cập qua XML-RPC để Gateway đọc hồ sơ và đồng bộ dữ liệu.
 
 ---
 
@@ -50,6 +46,13 @@ Hệ thống kết nối trực tiếp qua chuẩn XML-RPC của Odoo (`common` 
 5. Cấu hình domain Google: Để trống biến `GOOGLE_WORKSPACE_DOMAINS` để cho phép mọi tài khoản Google (bao gồm Gmail cá nhân). Nếu cần giới hạn theo doanh nghiệp, điền danh sách domain cách nhau bằng dấu phẩy (ví dụ: `company.com`).
 
 ---
+
+### 2.3. Bật Google Workspace MCP
+
+1. Đăng ký Google Workspace Developer Preview. Trong đúng Google Cloud project của OAuth client, bật API nền và dịch vụ MCP cho Gmail, Calendar, Drive, Docs, Sheets và Slides theo [hướng dẫn của Google](https://developers.google.com/workspace/guides/configure-mcp-servers).
+2. Trong **Google Auth Platform → Clients**, mở OAuth client của Gateway và bật **Use this client for an AI-powered agent**. Nếu dùng client riêng, cấu hình thông tin client mới trong Gateway và đăng ký đúng callback của Portal.
+3. Đặt `GOOGLE_WORKSPACE_MCP_ENABLED=true` trong `Auth_gateway/.env`, khởi động lại Auth Gateway rồi cấp quyền Google lại từ Portal nếu kết nối hiện tại thiếu quyền hoặc dùng OAuth client khác.
+4. Thử một thao tác đọc trên mỗi dịch vụ trước khi thực hiện thao tác ghi. Các thao tác có ánh xạ tương thích dùng MCP. Các thao tác còn lại, như gửi Gmail, tiếp tục dùng đường gọi REST hiện có.
 
 ## 3. Cấu hình Telegram Bot & Webhook
 

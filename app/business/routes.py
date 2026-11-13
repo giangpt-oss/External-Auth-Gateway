@@ -123,7 +123,8 @@ def execute_business_action(user_id, req, request):
     with authenticated_context(request, user_id, scope) as ctx:
         try:
             with sf() as db:
-                db.execute(text('BEGIN IMMEDIATE'))
+                if db.get_bind().dialect.name == 'sqlite':
+                    db.execute(text('BEGIN IMMEDIATE'))
                 old = db.query(ActionOperation).filter_by(user_id=user_id, operation_id=req.operation_id).first()
                 if old:
                     if old.telegram_binding_id != req.telegram_binding_id or old.payload_hash != payload_hash:
@@ -137,7 +138,9 @@ def execute_business_action(user_id, req, request):
                     revalidate_sources(ctx, json.loads(old_prep.data_json), old.action, old.status)
                     revalidate_result(ctx, old, json.loads(old_prep.data_json))
                     return cached_status(old)
-                prep = db.query(BusinessPreparation).filter_by(id=req.arguments['prepared_id'], user_id=user_id, action=req.action).first()
+                prep = db.query(BusinessPreparation).filter_by(
+                    id=req.arguments['prepared_id'], user_id=user_id, action=req.action,
+                ).with_for_update().first()
                 if not prep:
                     raise HTTPException(404, 'Không tìm thấy bản xem trước.')
                 principal(prep, ctx, scope)

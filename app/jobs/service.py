@@ -8,6 +8,7 @@ from app.calendar.reminders import ReminderService
 from app.calendar.service import CalendarSyncService
 from app.google.oauth import GoogleOAuthService
 from app.models import GoogleConnection, LinkToken, Outbox, Session, TelegramUpdate, User
+from app.workspace.network_slots import NetworkSlots, network_slots, outbound_user_id
 
 _logger = logging.getLogger(__name__)
 
@@ -24,6 +25,8 @@ class JobService:
         self.google_oauth = google_oauth
         self.calendar_sync = calendar_sync
         self.reminder_service = reminder_service
+        with session_factory() as db:
+            self.network_slots = NetworkSlots(db.get_bind())
 
         self._user_locks: dict[int, threading.Lock] = {}
         self._global_lock = threading.Lock()
@@ -52,7 +55,11 @@ class JobService:
         for uid in user_ids:
             with self._semaphore, self._get_user_lock(uid):
                 try:
-                    self.google_oauth.get_valid_access_token(uid)
+                    token = network_slots.set(self.network_slots)
+                    try:
+                        self.google_oauth.get_valid_access_token(uid)
+                    finally:
+                        network_slots.reset(token)
                 except Exception as e:
                     _logger.warning(f"Error auto-refreshing Google token for user {uid}: {e}")
 
@@ -64,7 +71,13 @@ class JobService:
         for uid in user_ids:
             with self._semaphore, self._get_user_lock(uid):
                 try:
-                    self.calendar_sync.sync_user(uid)
+                    token = network_slots.set(self.network_slots)
+                    owner_token = outbound_user_id.set(uid)
+                    try:
+                        self.calendar_sync.sync_user(uid)
+                    finally:
+                        outbound_user_id.reset(owner_token)
+                        network_slots.reset(token)
                 except Exception as e:
                     _logger.error(f"Error in background calendar sync for user {uid}: {e}")
 

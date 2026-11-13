@@ -66,7 +66,7 @@ def login(
     response: Response,
     login: str = Form(...),
     secret: str = Form(...),
-    credential_kind: str = Form("api_key"),
+    credential_kind: str = Form("password"),
     auth_service: AuthService = Depends(get_auth_service),
 ):
     client_ip = request.client.host if request.client else "127.0.0.1"

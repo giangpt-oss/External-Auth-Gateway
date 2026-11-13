@@ -272,3 +272,30 @@ class ActionOperation(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "operation_id", name="uq_action_operation_user"),
     )
+
+
+# Import all domain models to register with Base.metadata
+try:
+    import app.business.models
+except ImportError:
+    pass
+
+try:
+    import app.reporting.models
+except ImportError:
+    pass
+
+try:
+    import app.quotations.execution
+    import app.quotations.jobs
+    import app.quotations.tracking
+    import app.quotations.approval
+except ImportError:
+    pass
+
+from app.workspace.models import (
+    WorkspaceJob,
+    WorkspaceJobStatus,
+    WorkspaceIdempotencyRecord,
+    OAuthRefreshLease,
+)

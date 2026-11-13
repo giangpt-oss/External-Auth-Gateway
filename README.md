@@ -8,7 +8,7 @@ README này hướng dẫn cài đặt, cấu hình và vận hành riêng dự 
 
 ## Chức năng và trách nhiệm
 
-- Đăng nhập bằng tài khoản Odoo và mật khẩu hoặc API key cá nhân.
+- Đăng nhập bằng tài khoản và mật khẩu Odoo.
 - Ghép nối Telegram qua liên kết một lần từ portal.
 - Google OAuth, lưu token đã mã hóa và làm mới token.
 - Identity contract v2: user ID, tenant, database, Odoo UID, chức vụ, phòng ban, quản lý, quyền và Telegram binding.
@@ -172,7 +172,7 @@ Nếu chuyển tiếp tới dịch vụ AI chạy trong container khác, đặt 
 Người dùng thực hiện lần lượt 5 bước kiểm thử thực tế sau khi cấu hình đầy đủ thông tin vào `.env`:
 
 1. **Đăng nhập Odoo và liên kết Telegram/Google:**
-   - Truy cập portal [http://localhost:8080](http://localhost:8080), đăng nhập bằng URL tenant, database, email và API key/mật khẩu Odoo thật.
+   - Truy cập portal [http://localhost:8080](http://localhost:8080) và đăng nhập bằng tài khoản và mật khẩu Odoo của tenant đã cấu hình.
    - Nhấn nút liên kết Telegram, mở bot và bấm `/start` để hoàn tất ghép nối.
    - Nhấn nút liên kết Google, đăng nhập tài khoản Google (hỗ trợ cả Gmail cá nhân nếu để trống `GOOGLE_WORKSPACE_DOMAINS`) và cấp đủ quyền Calendar/Gmail.
 2. **Kiểm tra hồ sơ, quyền, lịch, Gmail và CRM:**

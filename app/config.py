@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     ODOO_URL: str = "https://mycompany.odoo.com"
     ODOO_DB: str = "mycompany"
     DATABASE_URL: str = "sqlite:///./data/gateway.db"
+    WORKSPACE_EMBEDDED_WORKER: bool = True
     ENCRYPTION_KEY: str = ""
 
     # Google OAuth
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_WORKSPACE_DOMAINS: list[str] | str = []
     GOOGLE_REDIRECT_URI: str | None = None
+    GOOGLE_WORKSPACE_MCP_ENABLED: bool = False
 
     @property
     def google_redirect_uri(self) -> str:
@@ -120,3 +122,11 @@ class Settings(BaseSettings):
                 raise ValueError("ODOO_URL must use HTTPS in production")
 
         return self
+
+
+from functools import lru_cache
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()

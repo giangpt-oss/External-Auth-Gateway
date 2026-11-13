@@ -10,9 +10,9 @@ def catalog_module():
     return importlib.import_module("app.workspace.catalog")
 
 
-def test_catalog_has_ten_services_and_read_write_methods():
+def test_catalog_has_active_services_and_read_write_methods():
     catalog = catalog_module()
-    assert set(catalog.SERVICES) == {"gmail", "calendar", "drive", "docs", "sheets", "slides", "tasks", "contacts", "chat", "meet"}
+    assert set(catalog.SERVICES) == {"gmail", "calendar", "drive", "docs", "sheets", "slides"}
     for service in catalog.SERVICES:
         methods = catalog.methods_for(service)
         assert any(m["kind"] == "read" for m in methods.values())

@@ -17,7 +17,7 @@
         Cổng Xác Thực & Đồng Bộ
       </h1>
       <p style="font-size: 0.875rem; color: var(--text-secondary); line-height: 1.45;">
-        Cổng liên kết tài khoản dành cho nhân viên. Đăng nhập bằng tài khoản Odoo để quản lý liên kết Google Workspace và trợ lý Telegram cá nhân.
+        Đăng nhập bằng tài khoản và mật khẩu Odoo để quản lý liên kết Google Workspace và Telegram.
       </p>
     </div>
 
@@ -34,28 +34,17 @@
     </div>
     {% endif %}
 
-    <form action="/auth/login" method="POST" autocomplete="off">
+    <form action="/auth/login" method="POST">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
       <div class="form-group">
-        <label for="login" class="form-label">Email Odoo của bạn</label>
-        <input type="email" id="login" name="login" required placeholder="nhanvien@congty.com" autocomplete="username" autofocus>
+        <label for="login" class="form-label">Tài khoản Odoo</label>
+        <input type="text" id="login" name="login" required placeholder="nhanvien@congty.com" autocomplete="username" autocapitalize="none" autofocus>
       </div>
 
       <div class="form-group">
-        <label for="credential_kind" class="form-label">Hình thức xác thực</label>
-        <select id="credential_kind" name="credential_kind" required>
-          <option value="password">Mật khẩu tài khoản Odoo</option>
-          <option value="api_key" selected>API Key cá nhân (Khuyên dùng)</option>
-        </select>
-        <p class="help-text">
-          Nếu tài khoản công ty dùng SSO Google hoặc Odoo Online, hãy dùng API Key cá nhân được tạo tại mục "Tài khoản của tôi" trên Odoo.
-        </p>
-      </div>
-
-      <div class="form-group">
-        <label for="secret" class="form-label">Mật khẩu hoặc API Key</label>
-        <input type="password" id="secret" name="secret" required placeholder="Nhập mật khẩu hoặc API Key" autocomplete="current-password">
+        <label for="secret" class="form-label">Mật khẩu Odoo</label>
+        <input type="password" id="secret" name="secret" required autocomplete="current-password">
       </div>
 
       <div style="margin-top: 1.5rem;">
