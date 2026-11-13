@@ -169,7 +169,7 @@ class QuotationService:
             domain.append(("type_tax_use", "in", ["sale", "none"]))
         if kind == "products" and "sale_ok" in schema:
             domain.append(("sale_ok", "=", True))
-        if query.strip() and kind in ('partners', 'products'):
+        if query.strip() and kind in ('partners', 'products', 'pricelists'):
             term = query.strip()[:150].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             searchable = [field for field in ('display_name', 'name', 'default_code') if field in schema]
             if searchable:
@@ -243,6 +243,8 @@ class QuotationService:
         if unsupported:
             raise QuotationValidationError(f"Odoo yêu cầu trường chưa hỗ trợ: {unsupported}.")
         order_fields = self._schema("sale.order")
+        if 'pricelist_id' in order_fields and not payload.get('pricelist_id'):
+            missing.append('pricelist_id')
         partner = None
         if not payload.get("partner_id"):
             missing.append("partner_id")
@@ -514,6 +516,8 @@ class QuotationService:
             differences.append("partner_id")
         if _m2o(result.get("company_id")) != company_id:
             differences.append("company_id")
+        if values.get('pricelist_id') and _m2o(result.get('pricelist_id')) != values['pricelist_id']:
+            differences.append('pricelist_id')
         actual_lines = result.get("lines", [])
         if len(actual_lines) != len(values["order_line"]):
             differences.append("line_count")

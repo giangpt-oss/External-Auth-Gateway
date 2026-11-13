@@ -672,7 +672,7 @@ class TelegramAIWorker:
                 "Content-Type": "application/json",
             }
             resp = httpx.post(ai_url, json=req_payload, headers=headers,
-                              timeout=75.0 if getattr(self.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False) else 35.0)
+                              timeout=75.0 if (getattr(self.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False) or getattr(self.settings, 'ENABLE_QUOTATIONS', False)) else 35.0)
             t_ai = time.time() - t_ai_start
             _logger.info("TIMING_AI: request_id=%s duration=%.3fs status=%s", request_id, t_ai, resp.status_code)
 

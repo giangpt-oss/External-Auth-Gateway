@@ -80,6 +80,9 @@ def stock_lines(service, payload, row):
 
 def prepare(service, definition, payload, row):
     kind, model = definition.kind, definition.model
+    if kind == 'quotation_chatter':
+        from app.business.quotation_chatter import prepare as prepare_chatter
+        return prepare_chatter(service, definition.name.rsplit('.', 1)[-1], payload, row)
     if kind == 'quotation_approval':
         from app.business.quotation_approval import prepare as prepare_approval
         return prepare_approval(service, definition, payload, row)
@@ -326,6 +329,9 @@ def wizard_result(service, definition, row, result):
 
 
 def execute(service, definition, payload, row, operation_id, checkpoint):
+    if definition.kind == 'quotation_chatter':
+        from app.business.quotation_chatter import execute as execute_chatter
+        return execute_chatter(service, definition.name.rsplit('.', 1)[-1], payload, row, checkpoint)
     if definition.kind == 'quotation_approval':
         from app.business.quotation_approval import execute as execute_approval
         return execute_approval(service, definition, payload, row, operation_id, checkpoint)

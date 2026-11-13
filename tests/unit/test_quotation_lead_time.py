@@ -62,6 +62,38 @@ def payload():
     return {'partner_id': 1, 'lines': [{'product_id': 2, 'quantity': 1, 'price_unit': 100, 'price_confirmed': True, 'tax_ids': [], 'customer_lead': 10}]}
 
 
+def test_pricelist_must_be_chosen_even_if_odoo_has_a_default(payload):
+    class WithPricelist(QuotationFixture):
+        def _schema(self, model):
+            schema = super()._schema(model)
+            if model == 'sale.order':
+                schema['pricelist_id'] = {'type': 'many2one', 'required': False, 'relation': 'product.pricelist'}
+            return schema
+    result = WithPricelist().prepare(payload)
+    assert result['status'] == 'needs_information'
+    assert 'pricelist_id' in result['missing_fields']
+
+
+def test_selected_pricelist_is_passed_to_odoo_to_compute_price(payload):
+    class WithPricelist(QuotationFixture):
+        def _schema(self, model):
+            schema = super()._schema(model)
+            if model == 'sale.order':
+                schema['pricelist_id'] = {'type': 'many2one', 'required': False, 'relation': 'product.pricelist'}
+            return schema
+        def _record(self, model, record_id, company_id, fields=None):
+            if model == 'product.pricelist':
+                return {'id': record_id, 'display_name': 'Bảng giá bệnh viện', 'currency_id': [1, 'VND']}
+            return super()._record(model, record_id, company_id, fields)
+    payload['pricelist_id'] = 7
+    payload['lines'][0].pop('price_unit')
+    payload['lines'][0].pop('price_confirmed')
+    result = WithPricelist().prepare(payload)
+    assert result['status'] == 'ready'
+    assert result['values']['pricelist_id'] == 7
+    assert 'price_unit' not in result['values']['order_line'][0][2]
+
+
 @pytest.mark.parametrize('days', [0, 1, 10, 2.5])
 def test_delivery_duration_is_supported_and_frozen(payload, days):
     service = QuotationFixture()

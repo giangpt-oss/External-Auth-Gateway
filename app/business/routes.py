@@ -53,7 +53,8 @@ def capabilities(user_id: int, request: Request, binding: TelegramScope = Depend
 @router.post('/lookup')
 def lookup(user_id: int, body: LookupRequest, request: Request):
     if not request.app.state.settings.ENABLE_BUSINESS_ACTIONS and not (
-        getattr(request.app.state.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False) and body.kind in ('sales', 'contacts', 'attachments')
+        (getattr(request.app.state.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False)
+         or getattr(request.app.state.settings, 'ENABLE_QUOTATIONS', False)) and body.kind in ('sales', 'contacts', 'attachments', 'users')
     ):
         raise HTTPException(409, 'Chức năng thao tác nghiệp vụ chưa được bật.')
     with authenticated_context(request, user_id, body) as ctx:

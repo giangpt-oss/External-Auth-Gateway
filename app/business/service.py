@@ -41,6 +41,8 @@ def number(value, minimum=0):
 
 def enabled(settings, definition):
     from app.business.quotation_approval import FLOW_ACTIONS
+    if definition.kind == 'quotation_chatter' and getattr(settings, 'ENABLE_QUOTATIONS', False):
+        return True
     if definition.name in FLOW_ACTIONS and getattr(settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False):
         return True
     if not getattr(settings, 'ENABLE_BUSINESS_ACTIONS', False):
@@ -158,7 +160,7 @@ class BusinessService:
         model = LOOKUPS[kind]
         self.access(model, 'read')
         meta = self.schema(model)
-        fields = [f for f in ('id', 'display_name', 'name', 'default_code', 'state', 'company_id', 'product_id', 'location_id', 'lot_id', 'quantity', 'reserved_quantity', 'product_uom_qty', 'partner_id', 'type') if f == 'id' or f in meta]
+        fields = [f for f in ('id', 'display_name', 'name', 'email', 'default_code', 'state', 'company_id', 'product_id', 'location_id', 'lot_id', 'quantity', 'reserved_quantity', 'product_uom_qty', 'partner_id', 'type') if f == 'id' or f in meta]
         domain = []
         if 'company_id' in meta:
             domain += ['|', ('company_id', '=', False), ('company_id', '=', self.company_id)]
@@ -167,7 +169,10 @@ class BusinessService:
         if kind == 'attachments':
             domain += [('res_model', 'in', sorted(TARGET_MODELS))]
         if query:
-            domain += [('display_name', 'ilike', query)]
+            if kind == 'contacts' and '@' in query and 'email' in meta:
+                domain += ['|', ('display_name', 'ilike', query), ('email', '=ilike', query)]
+            else:
+                domain += [('display_name', 'ilike', query)]
         items = self.ctx.call(model, 'search_read', [domain], {'fields': fields, 'limit': 21, 'context': {'active_test': False}})
         return {'status': 'ok', 'kind': kind, 'items': items[:20], 'has_more': len(items) > 20}
 
@@ -594,7 +599,7 @@ class BusinessService:
                 missing.extend(name for name in ('values.res_model_id', 'values.res_id') if not payload.get('values', {}).get(name.split('.')[-1]))
             else:
                 activity_target(self, payload, row)
-        allowed_options = {'convert', 'email', 'validate', 'return', 'inventory', 'activity_done', 'note', 'backorder', 'quotation_approval'}
+        allowed_options = {'convert', 'email', 'validate', 'return', 'inventory', 'activity_done', 'note', 'backorder', 'quotation_approval', 'quotation_chatter'}
         if definition.kind not in allowed_options and action != 'business.sales.confirm' and payload.get('options'):
             raise BusinessError('Thao tác này không nhận options.')
         requirements = []

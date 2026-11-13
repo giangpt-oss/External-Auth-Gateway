@@ -84,6 +84,9 @@ add('crm', 'crm.lead', 'convert', 'Chuyển lead thành cơ hội', 'convert')
 for module, model in (('sales', 'sale.order'), ('purchases', 'purchase.order')):
     add(module, model, 'send', 'Gửi báo giá/RFQ qua email', 'email', states=('draft', 'sent'))
 add('sales', 'sale.order', 'export', 'Xuất tài liệu báo giá Odoo', 'export')
+for op, title in (('message', 'Gửi tin trên báo giá'), ('note', 'Ghi chú nội bộ trên báo giá'),
+                  ('activity', 'Lên lịch hoạt động trên báo giá'), ('meeting', 'Lên lịch cuộc họp trên báo giá')):
+    add('sales', 'sale.order', op, title, 'quotation_chatter')
 for op, title in (('request_approval', 'Yêu cầu cấp trên duyệt báo giá'),
                   ('grant_approval', 'Duyệt nội bộ báo giá'), ('reject_approval', 'Từ chối duyệt báo giá')):
     add('sales', 'sale.order', op, title, 'quotation_approval', states=('draft', 'sent'))
