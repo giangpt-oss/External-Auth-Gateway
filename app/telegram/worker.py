@@ -650,6 +650,8 @@ class TelegramAIWorker:
         # Call AI Agent (Timeout 35s)
         ai_url = f"{self.settings.AI_AGENT_BASE_URL.rstrip('/')}/internal/v1/telegram/turn"
         request_id = f"tg-{update_id}"
+        reply_msg = message.get("reply_to_message") or {}
+        reply_to_text = (reply_msg.get("text") or reply_msg.get("caption") or "").strip()[:600]
         req_payload = {
             "request_id": request_id,
             "gateway_user_id": bound_user_id,
@@ -659,6 +661,8 @@ class TelegramAIWorker:
             "telegram_binding_id": current_binding_id,
             "received_at": datetime.now(UTC).isoformat(),
         }
+        if reply_to_text:
+            req_payload["reply_to_text"] = reply_to_text
 
         # Send typing action to Telegram
         try:
@@ -947,6 +951,8 @@ class TelegramAIWorker:
                         chat_id, artifact["filename"], artifact["content"],
                         content_type=artifact["content_type"],
                     )
+                elif isinstance(chunk, dict) and chunk.get("type") == "options":
+                    self.telegram_client.send_message(chat_id, chunk["text"], option_buttons=chunk["option_buttons"])
                 elif isinstance(chunk, dict):
                     self.telegram_client.send_message(chat_id, chunk["text"], confirmation_id=chunk["confirmation_id"])
                 else:
