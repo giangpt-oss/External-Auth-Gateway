@@ -54,6 +54,7 @@ def integrated_env(tmp_path, monkeypatch):
         TELEGRAM_BOT_USERNAME="TestBot",
         TELEGRAM_WEBHOOK_SECRET="expected_webhook_secret_xyz",
         AGENT_TO_GATEWAY_SECRET=agent_secret,
+        GATEWAY_TO_AGENT_SECRET="fixture-only-gateway-to-agent-secret",
         GOOGLE_WORKSPACE_MCP_ENABLED=False,
     )
     app = create_app(settings)

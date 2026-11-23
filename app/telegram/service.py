@@ -195,7 +195,7 @@ class TelegramService:
                     else:
                         self._handle_start_help(chat_id, telegram_user_id)
                 elif base_cmd == "/verify":
-                    self._handle_browser_verification(chat_id, telegram_user_id, username, cmd_tokens)
+                    self._redirect_legacy_verification(chat_id)
                 elif base_cmd == "/help":
                     self._handle_help(chat_id)
                 elif base_cmd == "/status":
@@ -280,7 +280,7 @@ class TelegramService:
             else:
                 self._handle_start_help(chat_id, telegram_user_id)
         elif base_cmd == "/verify":
-            self._handle_browser_verification(chat_id, telegram_user_id, username, text.split())
+            self._redirect_legacy_verification(chat_id)
         elif base_cmd == "/help":
             self._handle_help(chat_id)
         elif base_cmd == "/status" and len(text.split()) > 1:
@@ -299,19 +299,10 @@ class TelegramService:
         else:
             self._handle_ai_turn(update, chat_id, telegram_user_id, username, text)
 
-    def _handle_browser_verification(
-        self, chat_id: int, telegram_user_id: int, username: str | None, tokens: list[str],
-    ) -> None:
-        from app.telegram.web_verification import confirm_browser_code
-
-        settings = getattr(self, "settings", None)
-        if not settings or len(tokens) != 2:
-            message = "Hãy sao chép lệnh /verify từ portal Odoo."
-        else:
-            message = confirm_browser_code(
-                self.session_factory, settings, chat_id, telegram_user_id, username, tokens[1],
-            )
-        self.telegram_client.send_message(chat_id, message)
+    def _redirect_legacy_verification(self, chat_id: int) -> None:
+        self.telegram_client.send_message(
+            chat_id, "Hãy mở cổng Auth Gateway và chọn Mở ứng dụng Telegram để liên kết.",
+        )
 
     def _handle_pairing(
         self,

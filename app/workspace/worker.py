@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models import TelegramConnection, TelegramUpdate, User
 from app.security import decrypt_secret, encrypt_secret
 from app.workspace.models import WorkspaceJob, WorkspaceJobStatus
+from app.workspace.selection_manager import WorkspaceAccountPin, active_account_pin
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def valid_recipient(db, user_id, telegram_user_id, chat_id, binding):
         .filter(
             User.id == user_id,
             User.active.is_(True),
-            TelegramConnection.status == "connected",
+            TelegramConnection.status.in_(["connected", "pending_qr"]),
             TelegramConnection.telegram_user_id == telegram_user_id,
             TelegramConnection.private_chat_id == chat_id,
             TelegramConnection.binding_id == binding,
@@ -256,6 +257,21 @@ class WorkspaceWorker:
             if error is not None:
                 job.error_code = getattr(error, "code", type(error).__name__)
                 job.error_message = str(error)
+
+            from app.workspace.activity_tracker import ActivityType, WorkspaceActivityTracker
+            if status == WorkspaceJobStatus.WAITING_CONFIRMATION.value:
+                WorkspaceActivityTracker.register_activity(
+                    db,
+                    user_id=job.user_id,
+                    activity_type=ActivityType.PREVIEW_PENDING,
+                    reference_id=job.job_id,
+                    google_account_id=job.google_account_id,
+                )
+            elif status == WorkspaceJobStatus.UNKNOWN_RESULT.value:
+                WorkspaceActivityTracker.mark_reconciling(db, user_id=job.user_id, reference_id=job.job_id)
+            else:
+                WorkspaceActivityTracker.finish_activity(db, user_id=job.user_id, reference_id=job.job_id, status=status)
+
             db.commit()
             return True
 
@@ -470,7 +486,7 @@ class WorkspaceWorker:
                     trace = active_execution.get()
                     job_key = trace.job_id if trace else None
                     if job_key:
-                        idemp_db.query(WorkspaceJob).filter_by(
+                        reconciled = idemp_db.query(WorkspaceJob).filter_by(
                             job_id=job_key,
                             user_id=user_id,
                             operation_id=op_id,
@@ -487,6 +503,10 @@ class WorkspaceWorker:
                                 "callback_retry_at": datetime.now(UTC),
                             }
                         )
+                        if reconciled:
+                            from app.workspace.activity_tracker import WorkspaceActivityTracker
+
+                            WorkspaceActivityTracker.finish_activity(idemp_db, user_id, job_key)
                         idemp_db.commit()
                 return result
 
@@ -554,7 +574,7 @@ class WorkspaceWorker:
         agent_url = getattr(self.settings, "AI_AGENT_BASE_URL", "").rstrip("/")
         agent_secret = getattr(self.settings, "GATEWAY_TO_AGENT_SECRET", "")
         if not agent_url or not agent_secret:
-            return False
+            return True
 
         url = f"{agent_url}/internal/v1/workspace/job-completed"
         headers = {
@@ -592,6 +612,8 @@ class WorkspaceWorker:
             "telegram_chat_id": job.telegram_chat_id,
             "telegram_user_id": job.telegram_user_id,
             "telegram_binding_id": binding,
+            "google_account_id": job.google_account_id,
+            "google_selection_version": job.selection_version,
         }
         try:
             resp = await self._http_client.post(url, json=callback_body, headers=headers)
@@ -666,6 +688,7 @@ class WorkspaceWorker:
                 TelegramUpdate(
                     update_id=update_id,
                     user_id=job.user_id,
+                    google_account_id=job.google_account_id,
                     status="ai_received",
                     delivery_status="ready",
                     ai_response=stored_delivery,
@@ -765,6 +788,10 @@ class WorkspaceWorker:
             raw_payload = job.payload_encrypted
             deadline = job.deadline_at
             attempt = job.retry_count
+            pin = (
+                WorkspaceAccountPin(user_id, job.google_account_id, job.selection_version)
+                if job.google_account_id is not None else None
+            )
 
         payload_dict = _decrypt_data(raw_payload, key) or {}
         import time
@@ -808,6 +835,7 @@ class WorkspaceWorker:
                 dispatch_started = True
 
         write_token = before_write.set(guard_write)
+        account_token = active_account_pin.set(pin)
         deadline_token = None
         try:
             from app.workspace.service import WorkspaceError
@@ -886,6 +914,7 @@ class WorkspaceWorker:
             with dispatch_lock:
                 dispatch_closed = True
             before_write.reset(write_token)
+            active_account_pin.reset(account_token)
             if deadline_token is not None:
                 request_deadline.reset(deadline_token)
             heartbeat.cancel()

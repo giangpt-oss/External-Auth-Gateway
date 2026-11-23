@@ -3,7 +3,6 @@ import enum
 import json
 import logging
 import random
-import time
 from typing import Any, Optional
 
 import httpx
@@ -89,10 +88,10 @@ class UnifiedGoogleClient:
             timeout=httpx.Timeout(timeout=120.0, connect=3.0, pool=2.0),
         )
 
-    def get_user_google_connection(self, user_id: int):
+    def get_user_google_connection(self, user_id: int, account_id: Optional[int] = None):
         with self.oauth_service.session_factory() as db:
-            from app.models import GoogleConnection
-            return db.query(GoogleConnection).filter_by(user_id=user_id).first()
+            from app.google.account_resolver import GoogleAccountResolver
+            return GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=account_id)
 
     def _get_user_semaphore(self, user_id: int, is_write: bool) -> asyncio.Semaphore:
         if is_write:
@@ -244,7 +243,7 @@ class UnifiedGoogleClient:
                         is_quota = "quota" in err_text or "ratelimitexceeded" in err_text
                         is_scope = "insufficient" in err_text or "scope" in err_text
                         is_disabled = "disabled" in err_text or "has not been used in project" in err_text
-                        
+
                         if is_quota:
                             err_code = GoogleErrorCode.QUOTA_EXCEEDED
                             msg = "Tài khoản Google đã vượt hạn mức quota."
@@ -334,6 +333,14 @@ class GoogleClient:
         if hasattr(self, "_http_pool") and not self._http_pool.is_closed:
             self._http_pool.close()
 
+    def get_user_google_connection(self, user_id: int, account_id: int | None = None):
+        from app.workspace.selection_manager import current_account_pin
+
+        pin = current_account_pin(user_id)
+        return self.unified_client.get_user_google_connection(
+            user_id, account_id=account_id if account_id is not None else pin.account_id if pin else None,
+        )
+
     def _request(
         self,
         user_id: int,
@@ -344,7 +351,11 @@ class GoogleClient:
         headers: dict[str, str] | None = None,
         retry_on_401: bool = True,
     ) -> httpx.Response:
-        token = self.oauth_service.get_valid_access_token(user_id)
+        from app.workspace.selection_manager import current_account_pin
+
+        pin = current_account_pin(user_id)
+        account = {"google_account_id": pin.account_id} if pin else {}
+        token = self.oauth_service.get_valid_access_token(user_id, **account)
         req_headers = headers.copy() if headers else {}
         req_headers["Authorization"] = f"Bearer {token}"
 
@@ -357,7 +368,7 @@ class GoogleClient:
         if resp.status_code == 401 and retry_on_401:
             try:
                 # Discard current access token and re-fetch with force_refresh=True
-                token = self.oauth_service.get_valid_access_token(user_id, force_refresh=True)
+                token = self.oauth_service.get_valid_access_token(user_id, force_refresh=True, **account)
                 req_headers["Authorization"] = f"Bearer {token}"
                 with outbound_slot(user_id, write=method not in {"GET", "HEAD"}):
                     resp = self._http_pool.request(
@@ -476,11 +487,6 @@ class GoogleClient:
         return resp.json()
 
     # --- Gmail API ---
-    def get_user_google_connection(self, user_id: int):
-        from app.models import GoogleConnection
-
-        with self.oauth_service.session_factory() as db:
-            return db.query(GoogleConnection).filter_by(user_id=user_id).first()
 
     def check_has_scope(self, user_id: int, scope_fragment: str) -> bool:
         conn = self.get_user_google_connection(user_id)

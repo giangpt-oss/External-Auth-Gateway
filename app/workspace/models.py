@@ -40,6 +40,10 @@ class WorkspaceJob(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(String(64), unique=True, nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    selection_version = Column(Integer, nullable=True, default=1)
     request_id = Column(String(128), nullable=False, index=True)
     operation_id = Column(String(64), nullable=True, index=True)
     
@@ -102,7 +106,10 @@ class OAuthRefreshLease(Base):
     __tablename__ = "oauth_refresh_leases"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="CASCADE"), unique=True, nullable=True, index=True
+    )
     lease_holder = Column(String(64), nullable=True)
     lease_expires_at = Column(DateTime, nullable=True, index=True)
     connection_version = Column(Integer, nullable=False, default=1)

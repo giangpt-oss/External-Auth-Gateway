@@ -20,9 +20,11 @@ from app.models import User
 from app.reporting.context import bound_telegram_user
 from app.reporting.schemas import TelegramScope
 from app.security import decrypt_secret, encrypt_secret
+from app.workspace.activity_tracker import ActivityType, WorkspaceActivityTracker
 from app.workspace.catalog import overview
 from app.workspace.idempotency import compute_payload_hash
 from app.workspace.models import WorkspaceJob, WorkspaceJobStatus
+from app.workspace.selection_manager import SelectionManager, SwitchLockError
 from app.workspace.service import WorkspaceError
 
 router = APIRouter(
@@ -117,36 +119,16 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
     tool_plan = payload.service == "workspace" and payload.operation == "plan.read"
     if tool_plan and (
         effective_action != "read" or payload.is_write or not key
-        or not payload.telegram_binding_id or payload.telegram_chat_id is None
-        or payload.telegram_user_id is None
-        or not isinstance(payload.body.get("steps"), list)
-        or not 1 <= len(payload.body["steps"]) <= 8
+        or not payload.body.get("steps") or not 1 <= len(payload.body.get("steps", [])) <= 8
         or len(json.dumps(payload.body).encode()) > 65536
     ):
-        raise HTTPException(422, "Kế hoạch nền cần liên kết Telegram và tối đa 8 bước đọc.")
+        raise HTTPException(422, "Kế hoạch nền tối đa 8 bước.")
 
     with request.app.state.session_factory() as db:
         user = db.query(User).filter_by(id=user_id, active=True).first()
         if not user:
             raise HTTPException(404, detail="User not found or inactive")
         binding = None
-        if payload.telegram_user_id is not None or payload.telegram_chat_id is not None:
-            connection = user.telegram_connection
-            if (
-                not connection
-                or connection.status != "connected"
-                or not connection.binding_id
-                or (
-                    connection.telegram_user_id != payload.telegram_user_id
-                    or connection.private_chat_id != payload.telegram_chat_id
-                    or (
-                        payload.telegram_binding_id is not None
-                        and connection.binding_id != payload.telegram_binding_id
-                    )
-                )
-            ):
-                raise HTTPException(403, "RECONNECT_REQUIRED: Liên kết Telegram đã thay đổi.")
-            binding = connection.binding_id
 
         payload_data = {
             "action": effective_action,
@@ -158,15 +140,6 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
             "is_write": payload.is_write,
             "_ticket": ticket_val,
             "operation_id": payload.operation_id,
-            **(
-                {
-                    "telegram_binding_id": binding,
-                    "telegram_user_id": payload.telegram_user_id,
-                    "telegram_chat_id": payload.telegram_chat_id,
-                }
-                if binding
-                else {}
-            ),
         }
         current_hash = compute_payload_hash(payload_data)
 
@@ -202,6 +175,10 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
                 }
             target_status = existing.status
         else:
+            try:
+                pin = SelectionManager.admit(db, user_id)
+            except SwitchLockError as exc:
+                raise HTTPException(409, detail=f"ACCOUNT_BUSY: {exc.message}") from exc
             indexed = (
                 getattr(settings, "DRIVE_INDEX_ENABLED", False)
                 and payload.service == "drive"
@@ -210,7 +187,7 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
             if indexed or tool_plan:
                 from app.workspace.drive_permissions import current_link, link_payload
 
-                payload_data["drive_link"] = link_payload(current_link(db, user_id))
+                payload_data["drive_link"] = link_payload(current_link(db, user_id, pin.account_id))
                 if tool_plan and not payload_data["drive_link"]:
                     raise HTTPException(403, "Liên kết Google chưa hoạt động.")
             deadline = datetime.now(UTC) + timedelta(seconds=payload.deadline_seconds)
@@ -225,6 +202,8 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
                 operation=payload.operation,
                 protocol=payload.protocol,
                 is_write=payload.is_write,
+                google_account_id=pin.account_id,
+                selection_version=pin.selection_version,
                 status=WorkspaceJobStatus.QUEUED.value,
                 payload_encrypted=(
                     encrypt_secret(json.dumps(payload_data), key)
@@ -237,6 +216,15 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
             )
             db.add(new_job)
             try:
+                WorkspaceActivityTracker.register_activity(
+                    db,
+                    user_id=user_id,
+                    activity_type=ActivityType.TASK_QUEUED,
+                    reference_id=job_id_str,
+                    google_account_id=pin.account_id,
+                    has_outbound_write=payload.is_write,
+                    lease_expires_at=deadline,
+                )
                 db.commit()
             except IntegrityError:
                 db.rollback()
@@ -333,6 +321,7 @@ def get_workspace_job(user_id: int, job_id: str, request: Request):
                 job.error_message = None
                 job.callback_delivered_at = None
                 job.callback_retry_at = datetime.now(UTC)
+                WorkspaceActivityTracker.finish_activity(db, user_id, job.job_id)
                 db.commit()
         result = _job_result(db, job, key)
         return {
@@ -364,6 +353,9 @@ def cancel_workspace_job(user_id: int, job_id: str, request: Request):
             )
         )
         if updated:
+            WorkspaceActivityTracker.finish_activity(
+                db, user_id, job_id, status=WorkspaceJobStatus.CANCELLED.value,
+            )
             db.commit()
             return {"status": "cancelled", "job_id": job_id}
         job = db.query(WorkspaceJob).filter_by(job_id=job_id, user_id=user_id).first()

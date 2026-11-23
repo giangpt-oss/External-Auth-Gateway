@@ -58,7 +58,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         poller_stop_event = None
         if settings.APP_ENV != "test":
             from app.calendar.reminders import ReminderService
-            from app.calendar.service import CalendarSyncService
             from app.google.client import GoogleClient
             from app.google.oauth import GoogleOAuthService
             from app.jobs.scheduler import BackgroundScheduler
@@ -79,12 +78,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             odoo_client = OdooClient(url=settings.ODOO_URL, db=settings.ODOO_DB)
             tele_client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN)
 
-            cal_sync = CalendarSyncService(
-                session_factory=session_factory,
-                odoo_client=odoo_client,
-                google_client=google_client,
-                encryption_key=settings.ENCRYPTION_KEY or "dev_dummy_key_000000000000000000000=",
-            )
             reminder = ReminderService(
                 session_factory=session_factory,
                 telegram_client=tele_client,
@@ -95,13 +88,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             job_service = JobService(
                 session_factory=session_factory,
                 google_oauth=google_oauth,
-                calendar_sync=cal_sync,
                 reminder_service=reminder,
             )
             scheduler = BackgroundScheduler(
                 job_service=job_service,
                 refresh_interval=settings.REFRESH_JOB_SECONDS,
-                calendar_interval=settings.CALENDAR_JOB_SECONDS,
                 reminder_interval=settings.REMINDER_JOB_SECONDS,
             )
             scheduler.start()

@@ -6,10 +6,12 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.orm import aliased
 
-from app.models import GoogleConnection, TelegramUpdate, User
+from app.models import GoogleAccountSelection, GoogleConnection, TelegramUpdate, User
 from app.security import decrypt_secret, encrypt_secret
+from app.workspace.activity_tracker import ActivityType
 from app.workspace.drive_permissions import (
     DrivePermissions,
     current_link,
@@ -25,6 +27,7 @@ from app.workspace.models import (
     WorkspaceJob,
 )
 from app.workspace.network_slots import request_deadline
+from app.workspace.selection_manager import SelectionManager, SwitchLockError, current_account_pin
 from app.workspace.service import WorkspaceError
 from app.workspace.telemetry import measure_stage
 
@@ -118,6 +121,13 @@ class DriveRuntime:
         ).embed(texts, timeout=timeout)
 
     async def search(self, user_id, query, *, file_id=None, terms=(), expected=None):
+        try:
+            with SelectionManager.admit_activity(self.db, user_id):
+                return await self._search(user_id, query, file_id=file_id, terms=terms, expected=expected)
+        except SwitchLockError as exc:
+            return response("link_changed" if exc.code == "ACCOUNT_CHANGED" else "connection_error")
+
+    async def _search(self, user_id, query, *, file_id, terms, expected):
         link = await asyncio.to_thread(self._link, user_id)
         if expected is not None and expected != link_payload(link):
             return response("link_changed")
@@ -165,11 +175,16 @@ class DriveRuntime:
             "action": "index", "body": body, "drive_link": link_payload(link),
         }), self.key)
         with self.db.begin() as db:
-            if not lock_drive_link(db, link):
+            try:
+                pin = current_account_pin(link.user_id) or SelectionManager.admit(db, link.user_id)
+            except SwitchLockError:
+                return None
+            if current_link(db, link.user_id, pin.account_id) != link or not lock_drive_link(db, link):
                 return None
             db.add(WorkspaceJob(
                 job_id=job_id, user_id=link.user_id, request_id=job_id, action="index",
                 service="drive", operation=operation, status="queued", payload_encrypted=encrypted,
+                google_account_id=pin.account_id, selection_version=pin.selection_version,
                 deadline_at=datetime.now(UTC) + timedelta(seconds=deadline_seconds),
             ))
         return job_id
@@ -321,9 +336,23 @@ class DriveRuntime:
 
     def _active_links(self):
         with self.db() as db:
+            legacy_connection = aliased(GoogleConnection)
+            legacy_first = (
+                select(func.min(legacy_connection.id))
+                .where(legacy_connection.user_id == GoogleConnection.user_id)
+                .scalar_subquery()
+            )
             rows = db.execute(select(GoogleConnection.user_id, GoogleConnection.google_sub, GoogleConnection.link_version)
                 .join(User, User.id == GoogleConnection.user_id)
-                .where(User.active.is_(True), GoogleConnection.status == "connected")
+                .outerjoin(GoogleAccountSelection, GoogleAccountSelection.user_id == User.id)
+                .where(
+                    User.active.is_(True), GoogleConnection.status == "connected",
+                    or_(
+                        (GoogleAccountSelection.state == "accepting")
+                        & (GoogleAccountSelection.active_account_id == GoogleConnection.id),
+                        GoogleAccountSelection.user_id.is_(None) & (GoogleConnection.id == legacy_first),
+                    ),
+                )
                 .order_by(GoogleConnection.user_id)).all()
             return [DriveLink(*row) for row in rows if row.google_sub]
 
@@ -357,29 +386,37 @@ class DriveRuntime:
                     continue
                 deadline = request_deadline.set(time.monotonic() + 90)
                 try:
-                    start, daily, scopes, _ = await asyncio.to_thread(self._next_index_input, link)
-                    if start:
-                        if not await asyncio.to_thread(scan.initial_scan, link, max_pages=4):
-                            continue
-                    elif daily:
-                        if not await asyncio.to_thread(scan.daily_reconcile, link, max_pages=4):
-                            continue
-                    _, _, scopes, _ = await asyncio.to_thread(self._next_index_input, link)
-                    caught_up = True
-                    for scope in scopes:
-                        caught_up = await asyncio.to_thread(sync.incremental_sync, link, scope, max_pages=4) and caught_up
-                    if not caught_up:
-                        continue
-                    incomplete, _, _, pending = await asyncio.to_thread(self._next_index_input, link)
-                    if not incomplete:
-                        ready = [row for row in pending if (link, row.file_id) not in self.retry_at][:2]
-                        await asyncio.gather(*(self._index_pending(link, row) for row in ready))
+                    with SelectionManager.admit_activity(
+                        self.db, link.user_id, activity_type=ActivityType.DRIVE_SYNC,
+                    ):
+                        if await asyncio.to_thread(self._link, link.user_id) == link:
+                            await self._sync_link(link, scan, sync)
+                except SwitchLockError:
+                    continue
                 except WorkspaceError:
                     self.retry_at[throttle_key] = time.monotonic() + 300
                 finally:
                     request_deadline.reset(deadline)
         finally:
             network_slots.reset(token)
+
+    async def _sync_link(self, link, scan, sync):
+        start, daily, _, _ = await asyncio.to_thread(self._next_index_input, link)
+        if start:
+            if not await asyncio.to_thread(scan.initial_scan, link, max_pages=4):
+                return
+        elif daily and not await asyncio.to_thread(scan.daily_reconcile, link, max_pages=4):
+            return
+        _, _, scopes, _ = await asyncio.to_thread(self._next_index_input, link)
+        caught_up = True
+        for scope in scopes:
+            caught_up = await asyncio.to_thread(sync.incremental_sync, link, scope, max_pages=4) and caught_up
+        if not caught_up:
+            return
+        incomplete, _, _, pending = await asyncio.to_thread(self._next_index_input, link)
+        if not incomplete:
+            ready = [row for row in pending if (link, row.file_id) not in self.retry_at][:2]
+            await asyncio.gather(*(self._index_pending(link, row) for row in ready))
 
     async def _index_pending(self, link, row):
         try:

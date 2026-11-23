@@ -46,70 +46,78 @@ def _file_columns():
 
 
 def upgrade():
+    bind = op.get_bind()
+    insp = sa.inspect(bind)
+    tables = set(insp.get_table_names())
     is_postgres = op.get_context().dialect.name == "postgresql"
     if is_postgres:
         op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    op.create_table(
-        "drive_file_metadata",
-        *_file_columns(),
-        sa.Column("indexed_at", sa.DateTime(timezone=True)),
-        sa.Column("status", sa.String(32), nullable=False, server_default="pending"),
-        sa.Column("status_reason", sa.Text()),
-        sa.Column("embedding_model", sa.String(128)),
-        sa.Column("parser_version", sa.String(64)),
-        sa.PrimaryKeyConstraint(*FILE),
-    )
-    op.create_index("ix_drive_metadata_link_modified", "drive_file_metadata", [*LINK, "modified_time"])
-    op.create_index("ix_drive_metadata_link_scope", "drive_file_metadata", [*LINK, "drive_id"])
-    op.create_table(
-        "drive_scan_candidates",
-        *_file_columns(),
-        sa.PrimaryKeyConstraint(*FILE),
-    )
-    op.create_index("ix_drive_scan_link_modified", "drive_scan_candidates", [*LINK, "modified_time"])
-    op.create_table(
-        "drive_file_chunks",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        *_link_columns(),
-        sa.Column("file_id", sa.String(255), nullable=False),
-        sa.Column("file_version", sa.String(64), nullable=False),
-        sa.Column("chunk_index", sa.Integer(), nullable=False),
-        sa.Column("page_or_section", sa.String(128)),
-        sa.Column("encrypted_content", sa.Text(), nullable=False),
-        sa.Column("tsv", TSVECTOR() if is_postgres else sa.Text(), nullable=False),
-        sa.Column("embedding", Vector1536() if is_postgres else sa.Text()),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(FILE, [f"drive_file_metadata.{column}" for column in FILE], ondelete="CASCADE"),
-        sa.UniqueConstraint(*FILE, "chunk_index", name="uq_drive_file_chunk"),
-        sqlite_autoincrement=True,
-    )
-    if is_postgres:
-        op.create_index("ix_drive_chunks_tsv", "drive_file_chunks", ["tsv"], postgresql_using="gin")
-    op.create_table(
-        "drive_sync_checkpoints",
-        *_link_columns(),
-        sa.Column("scope", sa.String(255), nullable=False),
-        sa.Column("scan_id", sa.String(36)),
-        sa.Column("scan_page_token", sa.Text()),
-        sa.Column("start_page_token", sa.Text()),
-        sa.Column("scan_state", sa.String(32), nullable=False, server_default="pending"),
-        sa.Column("last_error_code", sa.String(64)),
-        sa.Column("last_full_scan_at", sa.DateTime(timezone=True)),
-        sa.Column("last_sync_at", sa.DateTime(timezone=True)),
-        sa.Column("last_success_at", sa.DateTime(timezone=True)),
-        sa.PrimaryKeyConstraint(*LINK, "scope"),
-    )
-    op.create_table(
-        "drive_permission_states",
-        *_link_columns(),
-        sa.Column("file_id", sa.String(255), nullable=False),
-        sa.Column("generation", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("checked_at", sa.DateTime(timezone=True)),
-        sa.Column("file_version", sa.String(64)),
-        sa.Column("scope", sa.String(255)),
-        sa.PrimaryKeyConstraint(*FILE),
-    )
-    op.create_index("ix_drive_permissions_link_scope", "drive_permission_states", [*LINK, "scope"])
+    if "drive_file_metadata" not in tables:
+        op.create_table(
+            "drive_file_metadata",
+            *_file_columns(),
+            sa.Column("indexed_at", sa.DateTime(timezone=True)),
+            sa.Column("status", sa.String(32), nullable=False, server_default="pending"),
+            sa.Column("status_reason", sa.Text()),
+            sa.Column("embedding_model", sa.String(128)),
+            sa.Column("parser_version", sa.String(64)),
+            sa.PrimaryKeyConstraint(*FILE),
+        )
+        op.create_index("ix_drive_metadata_link_modified", "drive_file_metadata", [*LINK, "modified_time"])
+        op.create_index("ix_drive_metadata_link_scope", "drive_file_metadata", [*LINK, "drive_id"])
+    if "drive_scan_candidates" not in tables:
+        op.create_table(
+            "drive_scan_candidates",
+            *_file_columns(),
+            sa.PrimaryKeyConstraint(*FILE),
+        )
+        op.create_index("ix_drive_scan_link_modified", "drive_scan_candidates", [*LINK, "modified_time"])
+    if "drive_file_chunks" not in tables:
+        op.create_table(
+            "drive_file_chunks",
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+            *_link_columns(),
+            sa.Column("file_id", sa.String(255), nullable=False),
+            sa.Column("file_version", sa.String(64), nullable=False),
+            sa.Column("chunk_index", sa.Integer(), nullable=False),
+            sa.Column("page_or_section", sa.String(128)),
+            sa.Column("encrypted_content", sa.Text(), nullable=False),
+            sa.Column("tsv", TSVECTOR() if is_postgres else sa.Text(), nullable=False),
+            sa.Column("embedding", Vector1536() if is_postgres else sa.Text()),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.ForeignKeyConstraint(FILE, [f"drive_file_metadata.{column}" for column in FILE], ondelete="CASCADE"),
+            sa.UniqueConstraint(*FILE, "chunk_index", name="uq_drive_file_chunk"),
+            sqlite_autoincrement=True,
+        )
+        if is_postgres:
+            op.create_index("ix_drive_chunks_tsv", "drive_file_chunks", ["tsv"], postgresql_using="gin")
+    if "drive_sync_checkpoints" not in tables:
+        op.create_table(
+            "drive_sync_checkpoints",
+            *_link_columns(),
+            sa.Column("scope", sa.String(255), nullable=False),
+            sa.Column("scan_id", sa.String(36)),
+            sa.Column("scan_page_token", sa.Text()),
+            sa.Column("start_page_token", sa.Text()),
+            sa.Column("scan_state", sa.String(32), nullable=False, server_default="pending"),
+            sa.Column("last_error_code", sa.String(64)),
+            sa.Column("last_full_scan_at", sa.DateTime(timezone=True)),
+            sa.Column("last_sync_at", sa.DateTime(timezone=True)),
+            sa.Column("last_success_at", sa.DateTime(timezone=True)),
+            sa.PrimaryKeyConstraint(*LINK, "scope"),
+        )
+    if "drive_permission_states" not in tables:
+        op.create_table(
+            "drive_permission_states",
+            *_link_columns(),
+            sa.Column("file_id", sa.String(255), nullable=False),
+            sa.Column("generation", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("checked_at", sa.DateTime(timezone=True)),
+            sa.Column("file_version", sa.String(64)),
+            sa.Column("scope", sa.String(255)),
+            sa.PrimaryKeyConstraint(*FILE),
+        )
+        op.create_index("ix_drive_permissions_link_scope", "drive_permission_states", [*LINK, "scope"])
 
 
 def downgrade():

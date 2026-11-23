@@ -5,6 +5,7 @@ import secrets
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from typing import Optional
 
 import httpx
 from google.auth.transport import requests as google_requests
@@ -20,8 +21,8 @@ from app.security import (
     hash_token,
 )
 from app.workspace.catalog import oauth_scopes
-from app.workspace.telemetry import measure_stage
 from app.workspace.network_slots import outbound_slot, request_deadline
+from app.workspace.telemetry import measure_stage
 
 
 class GoogleOAuthError(Exception):
@@ -103,7 +104,14 @@ class GoogleOAuthService:
         code_challenge = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
         return code_verifier, code_challenge
 
-    def begin(self, user_id: int, session_id: int | None = None, services: list[str] | None = None) -> tuple[str, str]:
+    def begin(
+        self,
+        user_id: int,
+        session_id: int | None = None,
+        services: list[str] | None = None,
+        mode: str = "add",
+        target_account_id: int | None = None,
+    ) -> tuple[str, str]:
         requested_scopes = self.DEFAULT_SCOPES if services is None else ["openid", "email", *oauth_scopes(services)]
         state = generate_secure_token(32)
         state_hash = hash_token(state)
@@ -112,18 +120,23 @@ class GoogleOAuthService:
 
         now = datetime.now(UTC)
         expires_at = now + timedelta(minutes=10)
+        purpose = (
+            f"google_oauth:reconnect:{target_account_id}"
+            if mode == "reconnect" and target_account_id
+            else "google_oauth"
+        )
 
         # Invalidate any unused prior google_oauth link tokens for this user
         with self.session_factory() as db:
             db.query(LinkToken).filter(
                 LinkToken.user_id == user_id,
-                LinkToken.purpose == "google_oauth",
+                LinkToken.purpose.like("google_oauth%"),
                 LinkToken.used_at.is_(None),
-            ).delete()
+            ).delete(synchronize_session=False)
 
             token_rec = LinkToken(
                 token_hash=state_hash,
-                purpose="google_oauth",
+                purpose=purpose,
                 user_id=user_id,
                 session_id=session_id,
                 oauth_nonce=nonce,
@@ -140,7 +153,7 @@ class GoogleOAuthService:
             "response_type": "code",
             "scope": scopes_str,
             "access_type": "offline",
-            "prompt": "consent",
+            "prompt": "select_account consent",
             "include_granted_scopes": "true",
             "state": state,
             "nonce": nonce,
@@ -161,7 +174,7 @@ class GoogleOAuthService:
                 db.query(LinkToken)
                 .filter(
                     LinkToken.token_hash == state_hash,
-                    LinkToken.purpose == "google_oauth",
+                    LinkToken.purpose.like("google_oauth%"),
                     LinkToken.user_id == user_id,
                     LinkToken.used_at.is_(None),
                     LinkToken.expires_at > now,
@@ -174,7 +187,17 @@ class GoogleOAuthService:
             code_verifier = self._decrypt(token_rec.encrypted_pkce_verifier)
             expected_nonce = token_rec.oauth_nonce
             token_rec.used_at = now
+            purpose_str = token_rec.purpose or "google_oauth:add"
             db.commit()
+
+        # Parse mode and target_account_id
+        parts = purpose_str.split(":")
+        if len(parts) >= 3 and parts[1] == "reconnect":
+            mode = "reconnect"
+            target_account_id = int(parts[2]) if parts[2].isdigit() else None
+        else:
+            mode = "add"
+            target_account_id = None
 
         # Exchange authorization code for tokens
         token_data = {
@@ -232,45 +255,111 @@ class GoogleOAuthService:
 
         expires_at = now + timedelta(seconds=expires_in)
 
-        # Upsert GoogleConnection and check subject consistency
+        # Upsert GoogleConnection and update GoogleAccountSelection
         with self.session_factory() as db:
-            existing = db.query(GoogleConnection).filter_by(user_id=user_id).with_for_update().first()
-            if existing:
-                if existing.google_sub != google_sub:
-                    raise DifferentGoogleAccountError(
-                        f"Cannot connect a different Google account. Existing: {existing.email}, New: {email}"
-                    )
-                existing.email = email
-                existing.scopes = granted_scope
-                existing.encrypted_access_token = self._encrypt(access_token)
-                if refresh_token:
-                    existing.encrypted_refresh_token = self._encrypt(refresh_token)
-                existing.expires_at = expires_at
-                existing.status = "connected"
-                existing.connection_version += 1
-                existing.link_version = getattr(existing, "link_version", 1) + 1
-            else:
-                conn = GoogleConnection(
-                    user_id=user_id,
-                    google_sub=google_sub,
-                    email=email,
-                    scopes=granted_scope,
-                    encrypted_access_token=self._encrypt(access_token),
-                    encrypted_refresh_token=self._encrypt(refresh_token) if refresh_token else None,
-                    expires_at=expires_at,
-                    status="connected",
-                    connection_version=1,
-                    link_version=1,
+            from app.google.account_resolver import GoogleAccountResolver
+            from app.models import GoogleAccountSelection
+
+            selection = GoogleAccountResolver.lock_selection(db, user_id)
+
+            # 1. Enforce that google_sub is not bound to another gateway user
+            other_user_conn = (
+                db.query(GoogleConnection)
+                .filter(GoogleConnection.google_sub == google_sub, GoogleConnection.user_id != user_id)
+                .first()
+            )
+            if other_user_conn:
+                raise GoogleOAuthError(
+                    f"Tài khoản Google ({email}) đã được liên kết với một người dùng khác trên hệ thống."
                 )
-                db.add(conn)
+
+            # 2. Handle Reconnect vs Add
+            target_conn = None
+            if mode == "reconnect" and target_account_id:
+                reconnect_target = (
+                    db.query(GoogleConnection)
+                    .filter_by(id=target_account_id, user_id=user_id)
+                    .with_for_update()
+                    .first()
+                )
+                if not reconnect_target:
+                    raise GoogleOAuthError("Không tìm thấy tài khoản đích cần kết nối lại.")
+                if reconnect_target.google_sub != google_sub:
+                    raise DifferentGoogleAccountError(
+                        f"Tài khoản Google được chọn ({email}) không khớp với tài khoản ban đầu ({reconnect_target.email})."
+                    )
+                reconnect_target.email = email
+                reconnect_target.scopes = granted_scope
+                reconnect_target.encrypted_access_token = self._encrypt(access_token)
+                if refresh_token:
+                    reconnect_target.encrypted_refresh_token = self._encrypt(refresh_token)
+                reconnect_target.expires_at = expires_at
+                reconnect_target.status = "connected"
+                reconnect_target.connection_version += 1
+                reconnect_target.link_version = getattr(reconnect_target, "link_version", 1) + 1
+                target_conn = reconnect_target
+            else:
+                # Add mode: check if this user already linked this exact google_sub
+                existing_own = (
+                    db.query(GoogleConnection)
+                    .filter_by(user_id=user_id, google_sub=google_sub)
+                    .with_for_update()
+                    .first()
+                )
+                if existing_own:
+                    existing_own.email = email
+                    existing_own.scopes = granted_scope
+                    existing_own.encrypted_access_token = self._encrypt(access_token)
+                    if refresh_token:
+                        existing_own.encrypted_refresh_token = self._encrypt(refresh_token)
+                    existing_own.expires_at = expires_at
+                    existing_own.status = "connected"
+                    existing_own.connection_version += 1
+                    existing_own.link_version = getattr(existing_own, "link_version", 1) + 1
+                    target_conn = existing_own
+                else:
+                    new_conn = GoogleConnection(
+                        user_id=user_id,
+                        google_sub=google_sub,
+                        email=email,
+                        scopes=granted_scope,
+                        encrypted_access_token=self._encrypt(access_token),
+                        encrypted_refresh_token=self._encrypt(refresh_token) if refresh_token else None,
+                        expires_at=expires_at,
+                        status="connected",
+                        connection_version=1,
+                        link_version=1,
+                    )
+                    db.add(new_conn)
+                    db.flush()
+                    target_conn = new_conn
+
+            # 3. Update account selection: if user has no active account, auto-set as active
+            if not selection:
+                selection = GoogleAccountSelection(
+                    user_id=user_id,
+                    active_account_id=target_conn.id,
+                    selection_version=1,
+                    state="accepting",
+                )
+                db.add(selection)
+            elif not selection.active_account_id:
+                selection.active_account_id = target_conn.id
+                selection.selection_version = getattr(selection, "selection_version", 0) + 1
+                selection.state = "accepting"
+
             db.commit()
 
-    def _perform_network_refresh(self, user_id: int) -> tuple[str, int, str | None]:
+    def _perform_network_refresh(
+        self, user_id: int, google_account_id: Optional[int] = None
+    ) -> tuple[str, int, str | None]:
         """Thực hiện HTTP POST refresh token với Google endpoint."""
         with self.session_factory() as db:
-            conn = db.query(GoogleConnection).filter_by(user_id=user_id).first()
+            from app.google.account_resolver import GoogleAccountResolver
+            conn = GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=google_account_id)
             if not conn or conn.status != "connected":
                 raise GoogleAuthRevokedError("Google connection is missing or not connected.")
+            conn_id = conn.id
             refresh_token = self._decrypt(conn.encrypted_refresh_token)
             identity = (conn.google_sub, conn.connection_version, conn.encrypted_refresh_token)
             if not refresh_token:
@@ -298,7 +387,7 @@ class GoogleOAuthService:
         if resp.status_code != 200:
             if data.get("error") == "invalid_grant":
                 with self.session_factory() as db:
-                    conn = db.query(GoogleConnection).filter_by(user_id=user_id).with_for_update().first()
+                    conn = db.query(GoogleConnection).filter_by(id=conn_id).with_for_update().first()
                     if conn and (conn.google_sub, conn.connection_version, conn.encrypted_refresh_token) == identity:
                         conn.status = "reconnect_required"
                         conn.connection_version = getattr(conn, "connection_version", 1) + 1
@@ -313,11 +402,18 @@ class GoogleOAuthService:
             raise GoogleOAuthError("Google token refresh response did not contain an access token")
         return new_access_token, expires_in, data.get("refresh_token")
 
-    def get_valid_access_token(self, user_id: int, force_refresh: bool = False) -> str:
+    def get_valid_access_token(
+        self,
+        user_id: int,
+        force_refresh: bool = False,
+        google_account_id: Optional[int] = None,
+    ) -> str:
         # Check distributed lease in database to coordinate across multiple worker processes
         now = datetime.now(UTC)
+        resolved_account_id = None
         with self.session_factory() as db:
-            conn = db.query(GoogleConnection).filter_by(user_id=user_id).first()
+            from app.google.account_resolver import GoogleAccountResolver
+            conn = GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=google_account_id)
             if not conn or conn.status != "connected":
                 raise GoogleAuthRevokedError(
                     "Google connection is missing or not in connected status."
@@ -326,8 +422,9 @@ class GoogleOAuthService:
             # If token still valid for more than 5 minutes and not force_refresh, return it directly
             if not force_refresh and ensure_utc(conn.expires_at) > now + timedelta(minutes=5):
                 return self._decrypt(conn.encrypted_access_token)
+            resolved_account_id = conn.id
 
-        # Acquire distributed lease across processes
+        # Acquire distributed lease across processes keyed by google_account_id
         from app.auth.oauth_lease import DistributedOAuthLeaseManager
         lease_mgr = DistributedOAuthLeaseManager(self)
         try:
@@ -338,21 +435,86 @@ class GoogleOAuthService:
         if loop and loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(asyncio.run, lease_mgr.get_valid_token(user_id, force_refresh=force_refresh))
+                future = executor.submit(
+                    asyncio.run,
+                    lease_mgr.get_valid_token(
+                        user_id,
+                        force_refresh=force_refresh,
+                        google_account_id=resolved_account_id,
+                    ),
+                )
                 return future.result(timeout=max(float(lease_mgr.lease_seconds) + 15.0, 45.0))
         else:
-            return asyncio.run(lease_mgr.get_valid_token(user_id, force_refresh=force_refresh))
+            return asyncio.run(
+                lease_mgr.get_valid_token(
+                    user_id,
+                    force_refresh=force_refresh,
+                    google_account_id=resolved_account_id,
+                )
+            )
 
-    def disconnect(self, user_id: int) -> None:
+    def disconnect(self, user_id: int, google_account_id: Optional[int] = None) -> None:
         with self.session_factory() as db:
-            conn = db.query(GoogleConnection).filter_by(user_id=user_id).first()
+            from app.google.account_resolver import GoogleAccountResolver
+            from app.workspace.activity_tracker import WorkspaceActivityTracker
+            selection = GoogleAccountResolver.lock_selection(db, user_id)
+            conn = GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=google_account_id)
             if not conn:
                 return
+
+            blockers = WorkspaceActivityTracker.get_active_blockers(db, user_id, account_id=conn.id)
+            if blockers:
+                raise GoogleOAuthError(
+                    f"Không thể ngắt kết nối tài khoản ({conn.email}) khi còn tác vụ đang chạy."
+                )
 
             refresh_token = self._decrypt(conn.encrypted_refresh_token)
             conn.status = "disconnected"
             conn.connection_version = getattr(conn, "connection_version", 1) + 1
             conn.link_version = getattr(conn, "link_version", 1) + 1
+
+            if selection and selection.active_account_id == conn.id:
+                selection.active_account_id = None
+                selection.selection_version += 1
+                selection.state = "accepting"
+                selection.draining_since = None
+                selection.target_account_id = None
+            db.commit()
+
+        # Revoke token with Google
+        if refresh_token:
+            try:
+                httpx.post(self.REVOKE_ENDPOINT, params={"token": refresh_token}, timeout=10.0)
+            except Exception:
+                pass
+
+    def delete(self, user_id: int, google_account_id: int) -> None:
+        with self.session_factory() as db:
+            from app.google.account_resolver import GoogleAccountResolver
+            from app.workspace.activity_tracker import WorkspaceActivityTracker
+
+            selection = GoogleAccountResolver.lock_selection(db, user_id)
+            conn = GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=google_account_id)
+            if not conn:
+                return
+
+            blockers = WorkspaceActivityTracker.get_active_blockers(db, user_id, account_id=conn.id)
+            if blockers:
+                raise GoogleOAuthError(
+                    f"Không thể xóa tài khoản ({conn.email}) khi còn tác vụ đang chạy."
+                )
+
+            refresh_token = self._decrypt(conn.encrypted_refresh_token)
+
+            # Clear selection if this account is active
+            if selection and selection.active_account_id == conn.id:
+                selection.active_account_id = None
+                selection.selection_version += 1
+                selection.state = "accepting"
+                selection.draining_since = None
+                selection.target_account_id = None
+
+            db.delete(conn)
             db.commit()
 
         # Revoke token with Google

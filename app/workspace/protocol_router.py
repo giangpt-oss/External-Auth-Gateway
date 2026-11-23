@@ -32,7 +32,7 @@ class ProtocolRouter:
         params: Dict[str, Any],
         body: Dict[str, Any],
         media: Any = None,
-        user_id: Optional[int] = None,
+        user_id: Optional[int | tuple[int, int]] = None,
     ) -> ProtocolChoice:
         """Select protocol based on service capability, media, mapping, and circuit breaker."""
         if not self.mcp_enabled:

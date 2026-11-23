@@ -35,6 +35,7 @@ def seeded(tmp_path):
         "users", "google_connections", "drive_file_metadata", "drive_file_chunks",
         "drive_sync_checkpoints", "drive_permission_states",
         "drive_scan_candidates", "workspace_jobs", "telegram_connections", "telegram_updates",
+        "google_account_selections", "workspace_activities",
     }
     Base.metadata.create_all(engine, tables=[table for table in Base.metadata.sorted_tables if table.name in table_names])
     db = sessionmaker(engine)

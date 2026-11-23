@@ -30,7 +30,7 @@ class NetworkSlots:
         self.local = BoundedSemaphore(2 if background else 8)
 
     @contextmanager
-    def acquire(self, user_id, write=False):
+    def acquire(self, user_id, write=False, *, account_id=None):
         end = time.monotonic() + 2
         deadline = request_deadline.get()
         if deadline is not None:
@@ -45,9 +45,10 @@ class NetworkSlots:
                 yield
                 return
             groups = []
+            owner = (user_id, account_id) if account_id is not None else (user_id,)
             if self.background:
-                groups.append([_key("workspace-background", user_id)])
-            groups.append([_key("workspace-user", user_id, write, i) for i in range(1 if write else 4)])
+                groups.append([_key("workspace-background", *owner)])
+            groups.append([_key("workspace-user", *owner, write, i) for i in range(1 if write else 4)])
             groups.append([_key("workspace-global", i) for i in (range(14, 16) if self.background else range(16))])
             with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 while time.monotonic() < end:
@@ -80,6 +81,8 @@ class NetworkSlots:
 
 @contextmanager
 def outbound_slot(user_id, *, write=False):
+    from app.workspace.selection_manager import current_account_pin
+
     limiter = network_slots.get()
     guard = before_write.get() if write else None
     deadline = request_deadline.get()
@@ -90,7 +93,9 @@ def outbound_slot(user_id, *, write=False):
             guard()
         yield
     else:
-        with limiter.acquire(user_id, write):
+        pin = current_account_pin(user_id)
+        account = {"account_id": pin.account_id} if pin else {}
+        with limiter.acquire(user_id, write, **account):
             if guard:
                 guard()
             yield

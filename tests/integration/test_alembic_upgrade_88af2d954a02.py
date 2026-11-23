@@ -76,6 +76,14 @@ def alembic_test_db():
             )
         """))
         conn.execute(text("CREATE UNIQUE INDEX ix_workspace_jobs_user_request ON workspace_jobs (user_id, request_id)"))
+        conn.execute(text("INSERT INTO users (id, email) VALUES (2, 'legacy@example.invalid')"))
+        conn.execute(text("""
+            INSERT INTO google_connections (
+                id, user_id, google_sub, email, scopes, encrypted_access_token, expires_at
+            ) VALUES (
+                17, 2, 'legacy-sub', 'legacy@example.invalid', 'openid', 'legacy-encrypted', CURRENT_TIMESTAMP
+            )
+        """))
 
     # Configure Alembic
     cfg = Config("alembic.ini")
@@ -106,8 +114,16 @@ def test_upgrade_from_88af2d954a02_adds_connection_version_and_tables(alembic_te
     assert "oauth_refresh_leases" not in insp.get_table_names()
     assert "workspace_idempotency_records" not in insp.get_table_names()
 
-    # 2. Run alembic upgrade to head (c7d8e9f0a1b2)
+    # 2. Upgrade all revisions and verify the existing account was selected.
     command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        migrated = conn.execute(text("""
+            SELECT s.active_account_id, g.encrypted_access_token
+            FROM google_account_selections s
+            JOIN google_connections g ON g.id = s.active_account_id
+            WHERE s.user_id = 2
+        """)).one()
+        assert migrated == (17, "legacy-encrypted")
 
     # 3. Verify that connection_version is now present and tables are created
     insp = inspect(engine)

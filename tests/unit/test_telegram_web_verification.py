@@ -1,4 +1,3 @@
-import re
 from unittest.mock import MagicMock
 from urllib.parse import parse_qs, urlsplit
 
@@ -7,9 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from app.models import TelegramConnection, TelegramUpdate
+from app.models import TelegramConnection
 from app.odoo.service import OdooService
-from app.telegram.service import create_telegram_service
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
@@ -34,10 +32,9 @@ def test_ambiguous_employee_records_are_rejected():
 
 
 
-@pytest.mark.parametrize("flow", ["oidc", "browser"])
 @pytest.mark.parametrize("confirmed_id", [42, 99])
 def test_web_verification_binds_only_matching_telegram_id(
-    temp_db_path, fernet_key, monkeypatch, confirmed_id, flow,
+    temp_db_path, fernet_key, monkeypatch, confirmed_id,
 ):
     from app.telegram import web_verification
 
@@ -75,54 +72,30 @@ def test_web_verification_binds_only_matching_telegram_id(
         csrf = login.json()["csrf_token"]
         initial_status = client.get(status_path)
         assert initial_status.headers["Cache-Control"] == "no-store"
-        assert initial_status.json() == {"verified": False, "state": "not_verified", "revision": ""}
+        assert initial_status.json() == {
+            "verified": False, "state": "not_verified", "linked": False, "revision": "",
+        }
         dashboard = client.get("/").text
-        assert dashboard.count('id="btn-verify-telegram"') == 1
+        assert "Liên kết Telegram" in dashboard
         fallback = client.get("/connections/telegram/verification-options")
         assert fallback.status_code == 200
-        assert 'action="/connections/telegram/verify-browser"' in fallback.text
+        assert "Chưa liên kết" in dashboard and "Chưa liên kết" in fallback.text
         assert 'action="/connections/telegram/verify"' in fallback.text
-        assert '<details id="telegram-verification-options"' in dashboard
-        options = dashboard.split('<details id="telegram-verification-options"', 1)[1].split("</details>", 1)[0]
-        assert '<summary id="btn-verify-telegram"' in options
-        assert 'action="/connections/telegram/verify-browser"' in options
-        assert 'action="/connections/telegram/verify"' in options
         assert "https://t.me/ExampleOfficeBot" not in client.get("/?status=telegram_verified").text
         assert client.post("/connections/telegram/link").status_code == 409
         assert client.post("/connections/telegram/verify", data={"csrf_token": "invalid"}).status_code == 403
-        if flow == "browser":
-            response = client.post("/connections/telegram/verify-browser", data={"csrf_token": csrf})
-            assert response.status_code == 200
-            assert response.headers["Cache-Control"] == "no-store"
-            code = re.search(r'value="/verify ([A-Za-z0-9_-]{32})"', response.text)[1]
-            bot = MagicMock()
-            service = create_telegram_service(settings, app.state.session_factory, telegram_client=bot)
-            update = {
-                "update_id": 123,
-                "message": {
-                    "chat": {"type": "private", "id": confirmed_id},
-                    "from": {"id": confirmed_id, "username": "employee"},
-                    "text": f"/verify {code}",
-                },
-            }
-            service.ingest_update(update)
-            status_result = client.get(status_path).json()
-            assert status_result["verified"] == (confirmed_id == 42)
-            assert bool(status_result["revision"]) == (confirmed_id == 42)
-            reply = bot.send_message.call_args.args[1]
-            assert ("Đã xác minh Telegram" in reply) == (confirmed_id == 42)
-            assert ('href="https://t.me/ExampleOfficeBot"' in client.get("/").text) == (confirmed_id == 42)
-            with app.state.session_factory() as db:
-                assert code not in db.query(TelegramUpdate).one().payload
-            if confirmed_id == 42:
-                service.ingest_update({**update, "update_id": 124})
-                assert "đã được dùng" in bot.send_message.call_args.args[1]
-            exchange.assert_not_called()
-            return
+        assert client.post("/connections/telegram/verify-browser", data={"csrf_token": csrf}).status_code == 404
 
-        start = client.post("/connections/telegram/verify", data={"csrf_token": csrf})
-        assert start.status_code == 303
-        redirect = urlsplit(start.headers["location"])
+        start = client.post(
+            "/connections/telegram/verify", data={"csrf_token": csrf},
+            headers={"Accept": "application/json"},
+        )
+        assert start.status_code == 200
+        assert start.headers["Cache-Control"] == "no-store"
+        payload = start.json()
+        assert payload["qr_code_data_uri"].startswith("data:image/png;base64,")
+        assert payload["expires_at"]
+        redirect = urlsplit(payload["link_url"])
         params = parse_qs(redirect.query)
         assert redirect.netloc == "oauth.telegram.org"
         assert params["scope"] == ["openid profile"]
@@ -155,6 +128,23 @@ def test_web_verification_binds_only_matching_telegram_id(
             changed_dashboard = client.get("/").text
             assert 'href="https://t.me/ExampleOfficeBot"' not in changed_dashboard
             assert "Telegram ID trên Odoo đã thay đổi" in changed_dashboard
+            assert "Cần xác minh" in changed_dashboard
+            assert "Cần xác minh" in client.get("/connections/telegram/verification-options").text
+
+        from datetime import UTC, datetime, timedelta
+
+        from app.models import LinkToken
+        from app.security import hash_token
+
+        new_attempt = client.post("/connections/telegram/verify", data={"csrf_token": csrf})
+        new_state = parse_qs(urlsplit(new_attempt.headers["location"]).query)["state"][0]
+        with app.state.session_factory() as db:
+            token = db.query(LinkToken).filter_by(token_hash=hash_token(new_state)).one()
+            token.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            db.commit()
+        expired = client.get("/oauth/telegram/callback", params={"state": new_state, "code": "test-code"})
+        assert "status=telegram_verified" not in expired.headers["location"]
+        exchange.assert_called_once()
 
 
 

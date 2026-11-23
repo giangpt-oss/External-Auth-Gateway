@@ -1,0 +1,17 @@
+{% set selection = google_selection|default(none) %}
+{% if telegram_state|default('') == 'mismatch' %}
+<p data-stitch-feedback data-error role="alert">Telegram ID trên Odoo đã thay đổi. Hãy xác minh lại tài khoản Telegram.</p>
+{% endif %}
+<script id="stitch-context" type="application/json">
+{
+  "csrf": {{ (csrf_token or '')|tojson }},
+  "selectionVersion": {{ selection.selection_version|default(1)|tojson }},
+  "draining": {{ (selection.state|default('') == 'draining')|tojson }},
+  "telegramState": {{ telegram_state|default('not_verified')|tojson }},
+  "telegramRevision": {{ telegram_revision|default('')|tojson }},
+  "telegramConfigured": {{ telegram_web_configured|default(false)|tojson }},
+  "workspaceApps": {{ workspace_apps|default({})|tojson }},
+  "error": {{ (error|default('') or request.query_params.get('error', ''))|tojson }}
+}
+</script>
+<script src="/static/stitch.js?v={{ portal_assets['stitch.js'] if portal_assets and 'stitch.js' in portal_assets else 'original-2' }}" defer></script>

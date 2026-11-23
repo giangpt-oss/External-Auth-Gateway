@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import sessionmaker
 
 from app.calendar.normalize import (
@@ -15,7 +16,7 @@ from app.calendar.normalize import (
     odoo_to_normalized,
 )
 from app.google.client import GoogleClient
-from app.models import CalendarPair, GoogleConnection, OdooCredential, SyncIntent, User
+from app.models import CalendarPair, OdooCredential, SyncIntent, User
 from app.odoo.client import OdooClient
 from app.security import decrypt_secret
 
@@ -48,7 +49,7 @@ class CalendarSyncService:
         self.google_client = google_client
         self.encryption_key = encryption_key
 
-    def _get_user_secrets(self, user_id: int) -> tuple[int, int, int | None, str, str, str] | None:
+    def _get_user_secrets(self, user_id: int) -> tuple[int, int, int | None, str, str, str, int] | None:
         with self.session_factory() as db:
             user = db.query(User).filter_by(id=user_id, active=True).first()
             if not user:
@@ -57,10 +58,12 @@ class CalendarSyncService:
             if not cred or not cred.encrypted_secret:
                 return None
             odoo_secret = decrypt_secret(cred.encrypted_secret, self.encryption_key)
-            g_conn = (
-                db.query(GoogleConnection).filter_by(user_id=user.id, status="connected").first()
-            )
-            if not g_conn:
+            from app.google.account_resolver import GoogleAccountResolver
+            from app.workspace.selection_manager import current_account_pin
+
+            pin = current_account_pin(user_id)
+            g_conn = GoogleAccountResolver.resolve_for_task(db, user_id, pin.account_id if pin else None)
+            if not g_conn or g_conn.status != "connected":
                 return None
             return (
                 user.id,
@@ -69,6 +72,7 @@ class CalendarSyncService:
                 user.tz or "Asia/Bangkok",
                 odoo_secret,
                 g_conn.google_sub,
+                g_conn.id,
             )
 
     def _generate_deterministic_google_id(self, user_id: int, odoo_event_id: int) -> str:
@@ -84,7 +88,7 @@ class CalendarSyncService:
         if not auth_data:
             return result
 
-        _, odoo_uid, partner_id, user_tz, odoo_secret, google_sub = auth_data
+        _, odoo_uid, partner_id, user_tz, odoo_secret, google_sub, google_account_id = auth_data
 
         now = datetime.now(UTC)
         start_window = now - timedelta(days=35)
@@ -164,7 +168,15 @@ class CalendarSyncService:
 
         # 3. Load existing pairs
         with self.session_factory() as db:
-            pairs = db.query(CalendarPair).filter_by(user_id=user_id).all()
+            pairs = (
+                db.query(CalendarPair)
+                .filter_by(user_id=user_id)
+                .filter(or_(
+                    CalendarPair.google_account_id == google_account_id,
+                    and_(CalendarPair.google_account_id.is_(None), CalendarPair.google_subject == google_sub),
+                ))
+                .all()
+            )
             pair_by_odoo = {p.odoo_event_id: p for p in pairs}
             pair_by_google = {p.google_event_id: p for p in pairs}
 
@@ -346,6 +358,7 @@ class CalendarSyncService:
             with self.session_factory() as db:
                 intent = SyncIntent(
                     user_id=user_id,
+                    google_account_id=google_account_id,
                     source="odoo",
                     target="google",
                     source_event_id=str(odoo_id),
@@ -370,6 +383,7 @@ class CalendarSyncService:
                 with self.session_factory() as db:
                     new_pair = CalendarPair(
                         user_id=user_id,
+                        google_account_id=google_account_id,
                         google_subject=google_sub,
                         google_calendar_id="primary",
                         odoo_event_id=odoo_id,
@@ -407,6 +421,7 @@ class CalendarSyncService:
             with self.session_factory() as db:
                 intent = SyncIntent(
                     user_id=user_id,
+                    google_account_id=google_account_id,
                     source="google",
                     target="odoo",
                     source_event_id=str(g_id),
@@ -440,6 +455,7 @@ class CalendarSyncService:
                 with self.session_factory() as db:
                     new_pair = CalendarPair(
                         user_id=user_id,
+                        google_account_id=google_account_id,
                         google_subject=google_sub,
                         google_calendar_id="primary",
                         odoo_event_id=new_odoo_id,

@@ -12,13 +12,11 @@ class BackgroundScheduler:
         self,
         job_service: JobService,
         refresh_interval: int = 60,
-        calendar_interval: int = 120,
         reminder_interval: int = 60,
         cleanup_interval: int = 3600,
     ):
         self.job_service = job_service
         self.refresh_interval = refresh_interval
-        self.calendar_interval = calendar_interval
         self.reminder_interval = reminder_interval
         self.cleanup_interval = cleanup_interval
 
@@ -46,7 +44,6 @@ class BackgroundScheduler:
 
     def _run_loop(self) -> None:
         last_refresh = 0.0
-        last_calendar = 0.0
         last_reminder = 0.0
         last_cleanup = 0.0
 
@@ -69,15 +66,7 @@ class BackgroundScheduler:
                     _logger.error(f"Error in reminders_and_outbox_job: {e}")
                 last_reminder = now_mono
 
-            # 3. Calendar Sync (every 120s)
-            if now_mono - last_calendar >= self.calendar_interval:
-                try:
-                    self.job_service.calendar_sync_job()
-                except Exception as e:
-                    _logger.error(f"Error in calendar_sync_job: {e}")
-                last_calendar = now_mono
-
-            # 4. Cleanup old data (every 1h)
+            # 3. Cleanup old data (every 1h)
             if now_mono - last_cleanup >= self.cleanup_interval:
                 try:
                     self.job_service.cleanup_old_data_job()

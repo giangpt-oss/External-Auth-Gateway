@@ -13,15 +13,13 @@ from app.workspace.service import WorkspaceError
 FIELDS = "id,version,trashed,capabilities(canDownload)"
 
 
-def current_link(db, user_id):
-    row = db.execute(
-        select(GoogleConnection)
-        .join(User, User.id == GoogleConnection.user_id)
-        .where(User.id == user_id, User.active.is_(True), GoogleConnection.status == "connected")
-    ).scalar_one_or_none()
-    if row is None or not row.google_sub:
+def current_link(db, user_id, account_id=None):
+    from app.google.account_resolver import GoogleAccountResolver
+
+    conn = GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=account_id)
+    if conn is None or conn.status != "connected" or not conn.google_sub:
         return None
-    return DriveLink(user_id, row.google_sub, row.link_version)
+    return DriveLink(user_id, conn.google_sub, conn.link_version)
 
 
 def link_payload(link):

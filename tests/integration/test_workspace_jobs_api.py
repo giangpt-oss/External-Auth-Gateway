@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
@@ -8,7 +9,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
 from app.main import create_app
-from app.models import Base, User
+from app.models import Base, GoogleConnection, User
+from app.security import encrypt_secret
 from app.workspace.models import WorkspaceJob, WorkspaceJobStatus
 
 
@@ -47,6 +49,13 @@ def client_with_db(tmp_path):
             active=True,
         )
         session.add(test_user)
+        session.flush()
+        session.add(GoogleConnection(
+            user_id=test_user.id, google_sub="jobs-test", email="jobs@example.invalid",
+            scopes="https://www.googleapis.com/auth/drive.readonly",
+            encrypted_access_token=encrypt_secret("fixture", fernet_key),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ))
         session.commit()
 
     with TestClient(app) as client:
