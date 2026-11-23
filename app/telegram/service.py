@@ -227,17 +227,27 @@ class TelegramService:
         callback_id = callback.get("id")
         data = callback.get("data")
         choice = re.fullmatch(rf"(confirm|cancel):({CONFIRMATION_ID})", data) if isinstance(data, str) else None
+        opt_choice = data[4:].strip() if isinstance(data, str) and data.startswith("opt:") and len(data) > 4 else None
         message = callback.get("message") or {}
         actor = callback.get("from") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
         result = {"status": "ignored", "reason": "Invalid confirmation callback"}
-        if (choice and type(chat_id) is int and chat_id == actor.get("id")
-                and chat.get("type") == "private" and not actor.get("is_bot")):
+        is_private_human = (
+            type(chat_id) is int
+            and chat_id == actor.get("id")
+            and chat.get("type") == "private"
+            and not actor.get("is_bot")
+        )
+        if choice and is_private_human:
             command, confirmation_id = choice.groups()
             result = self.ingest_update({"update_id": update.get("update_id"), "message": {
                 "chat": chat, "from": actor, "text": f"/{command} {confirmation_id}",
+            }})
+        elif opt_choice and is_private_human:
+            result = self.ingest_update({"update_id": update.get("update_id"), "message": {
+                "chat": chat, "from": actor, "text": opt_choice,
             }})
         if isinstance(callback_id, str) and callback_id:
             self.telegram_client.answer_callback_query(callback_id)
