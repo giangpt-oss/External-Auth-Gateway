@@ -1,130 +1,162 @@
-// Client side helper for Telegram QR code linking
-document.addEventListener("DOMContentLoaded", () => {
-  const verificationOptions = document.getElementById("telegram-verification-options");
-  const verificationProgress = document.getElementById("telegram-verification-progress");
+for (const choice of document.querySelectorAll('input[name="portal-theme"]')) {
+  choice.checked = choice.value === document.documentElement.dataset.theme;
+  choice.addEventListener("change", () => {
+    document.documentElement.dataset.theme = choice.value;
+    try { localStorage.setItem("gateway_theme", choice.value); } catch {}
+  });
+}
 
-  if (verificationOptions && verificationProgress) {
-    const initialRevision = verificationOptions.dataset.telegramRevision;
-    const initialState = verificationOptions.dataset.telegramState;
-    let verificationDeadline = 0;
-    let pollTimer;
-    let checking = false;
+const accounts = document.getElementById("account-picker");
+accounts?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !accounts.open) return;
+  const management = accounts.querySelector(".account-management");
+  if (management.open && management.contains(event.target)) {
+    management.open = false;
+    management.querySelector("summary").focus();
+  } else {
+    accounts.open = false;
+    accounts.querySelector("summary").focus();
+  }
+  event.preventDefault();
+});
 
-    async function checkVerification() {
-      if (checking) return;
-      checking = true;
-      clearTimeout(pollTimer);
-      let keepPolling = true;
+document.addEventListener("submit", (event) => {
+  const { deleteEmail, confirm: confirmation } = event.target.dataset;
+  if (deleteEmail && window.prompt(`Nhập đúng email để xóa tài khoản ${deleteEmail}.`) !== deleteEmail) {
+    event.preventDefault();
+  }
+  if (confirmation && !window.confirm(confirmation)) event.preventDefault();
+});
 
-      try {
-        const response = await fetch("/connections/telegram/verification-status", { cache: "no-store" });
-        if (response.status === 401) {
-          verificationProgress.hidden = false;
-          verificationProgress.textContent = "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.";
-          keepPolling = false;
-          return;
-        }
-        if (response.ok) {
-          const result = await response.json();
-          if (result.verified && result.revision !== initialRevision && verificationDeadline) {
-            keepPolling = false;
-            window.location.replace("/?status=telegram_verified");
-            return;
-          }
-          if (result.state !== initialState && !verificationDeadline) {
-            keepPolling = false;
-            window.location.replace("/");
-            return;
-          }
-        }
-      } catch {
-        // Retry on a temporary network error.
-      } finally {
-        checking = false;
-        if (verificationDeadline && Date.now() >= verificationDeadline) {
-          verificationDeadline = 0;
-          verificationProgress.textContent = "Chưa nhận được xác minh thành công. Bạn có thể thử lại.";
-        }
-        if (keepPolling && (verificationDeadline || !document.hidden)) {
-          pollTimer = setTimeout(checkVerification, verificationDeadline ? 2000 : 15000);
-        }
-      }
+const telegram = document.querySelector("[data-telegram-state]");
+if (telegram) {
+  const form = telegram.querySelector("[data-telegram-verify]");
+  const button = form?.querySelector("button") || telegram.querySelector("[data-telegram-start]");
+  const linkBox = telegram.querySelector("[data-telegram-link]");
+  const progress = telegram.querySelector("[data-telegram-progress]");
+  const qr = linkBox.querySelector("img");
+  const openLink = linkBox.querySelector("a");
+  let deadline = 0;
+  let timer;
+  let checking = false;
+  let issuing = false;
+
+  function showProgress(message) {
+    progress.hidden = false;
+    progress.textContent = message;
+  }
+
+  function clearLink() {
+    deadline = 0;
+    clearTimeout(timer);
+    linkBox.hidden = true;
+    qr.removeAttribute("src");
+    openLink.removeAttribute("href");
+  }
+
+  async function poll() {
+    if (!deadline || checking || issuing) return;
+    if (Date.now() >= deadline) {
+      clearLink();
+      showProgress("Mã QR đã hết hạn. Hãy tạo mã mới.");
+      return;
     }
 
-    verificationOptions.addEventListener("submit", () => {
-      verificationDeadline = Date.now() + 5 * 60 * 1000;
-      verificationProgress.hidden = false;
-      verificationProgress.textContent = "Đang chờ kết quả từ Telegram…";
-      clearTimeout(pollTimer);
-      pollTimer = setTimeout(checkVerification, 2000);
-    });
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) checkVerification();
-    });
-    if (!document.hidden) pollTimer = setTimeout(checkVerification, 15000);
-  }
-
-  const linkTgBtn = document.getElementById("btn-link-telegram");
-  const tgContainer = document.getElementById("telegram-link-box");
-
-  if (linkTgBtn && tgContainer) {
-    linkTgBtn.addEventListener("click", async (e) => {
-      e.preventDefault();
-      linkTgBtn.disabled = true;
-      linkTgBtn.innerText = "Đang tạo liên kết...";
-
-      try {
-        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
-        const res = await fetch("/connections/telegram/link", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": csrfToken,
-          },
-        });
-
-        if (!res.ok) {
-          const err = await res.json();
-          alert("Lỗi tạo liên kết Telegram: " + (err.error?.message || "Vui lòng thử lại"));
-          linkTgBtn.disabled = false;
-          linkTgBtn.innerText = "Tạo mã QR / Link";
-          return;
-        }
-
-        const data = await res.json();
-        tgContainer.innerHTML = `
-          <div class="qr-container">
-            <p><strong>1. Quét mã QR bằng camera/Telegram:</strong></p>
-            <img src="${data.qr_code_data_uri}" alt="Telegram QR Link" />
-            <p><strong>2. Hoặc nhấp vào link trực tiếp:</strong></p>
-            <a href="${data.link_url}" target="_blank" rel="noopener" class="btn btn-primary">Mở Telegram Bot</a>
-            <p class="help-text" id="tg-countdown">Mã liên kết có hiệu lực trong: 10 phút 00 giây</p>
-          </div>
-        `;
-        tgContainer.style.display = "block";
-
-        // Countdown timer 10 mins (600s)
-        let timeLeft = 600;
-        const countdownElem = document.getElementById("tg-countdown");
-        const timer = setInterval(() => {
-          timeLeft--;
-          if (timeLeft <= 0) {
-            clearInterval(timer);
-            if (countdownElem) countdownElem.innerText = "Mã liên kết đã hết hạn. Vui lòng tạo lại!";
-          } else {
-            const mins = Math.floor(timeLeft / 60);
-            const secs = timeLeft % 60;
-            if (countdownElem) {
-              countdownElem.innerText = `Mã liên kết có hiệu lực trong: ${mins} phút ${secs.toString().padStart(2, '0')} giây`;
-            }
-          }
-        }, 1000);
-
-      } catch (err) {
-        alert("Có lỗi mạng xảy ra: " + err);
-        linkTgBtn.disabled = false;
-        linkTgBtn.innerText = "Tạo mã QR / Link";
+    checking = true;
+    const attemptedDeadline = deadline;
+    try {
+      const response = await fetch("/connections/telegram/verification-status", { cache: "no-store" });
+      if (attemptedDeadline !== deadline) return;
+      if (response.status === 401) {
+        clearLink();
+        showProgress("Phiên Odoo đã hết hạn. Vui lòng đăng nhập lại.");
+        return;
       }
-    });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (attemptedDeadline !== deadline) return;
+      const changed = result.revision !== telegram.dataset.telegramRevision;
+      if (changed && (form ? result.verified : result.linked)) {
+        clearLink();
+        location.replace(form ? "/?status=telegram_verified" : "/");
+      }
+    } catch {
+      // Retry transient network failures until the link expires.
+    } finally {
+      checking = false;
+      if (deadline && !issuing) timer = setTimeout(poll, 2000);
+    }
   }
+
+  async function issue(event) {
+    event.preventDefault();
+    if (issuing) return;
+    issuing = true;
+    button.disabled = true;
+    clearLink();
+    showProgress("Đang tạo mã QR…");
+    try {
+      const csrf = document.querySelector('meta[name="csrf-token"]').content;
+      const response = await fetch(form?.action || button.dataset.telegramStart, {
+        method: "POST",
+        headers: { Accept: "application/json", "X-CSRF-Token": csrf },
+        body: form ? new FormData(form) : undefined,
+        redirect: "error",
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        if (response.status === 401) showProgress("Phiên Odoo đã hết hạn. Vui lòng đăng nhập lại.");
+        else showProgress("Không tạo được mã QR. Vui lòng thử lại.");
+        return;
+      }
+
+      const data = await response.json();
+      const link = new URL(data.link_url);
+      const expiry = Date.parse(data.expires_at);
+      if (link.protocol !== "https:" || !Number.isFinite(expiry) ||
+          !data.qr_code_data_uri.startsWith("data:image/png;base64,")) {
+        throw new Error("Invalid Telegram link");
+      }
+      qr.src = data.qr_code_data_uri;
+      openLink.href = link.href;
+      deadline = expiry;
+      linkBox.hidden = false;
+      button.textContent = "Tạo mã mới";
+      showProgress(form ? "Đang chờ xác minh từ Gateway…" : "Đang chờ liên kết Telegram…");
+      openLink.focus();
+    } catch {
+      showProgress("Không tạo được mã QR. Vui lòng thử lại.");
+    } finally {
+      issuing = false;
+      button.disabled = false;
+      if (deadline) timer = setTimeout(poll, 2000);
+    }
+  }
+
+  if (form) form.addEventListener("submit", issue);
+  else button?.addEventListener("click", issue);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && deadline) {
+      clearTimeout(timer);
+      poll();
+    }
+  });
+}
+
+const accountSearch = document.getElementById("account-search");
+function filterAccounts() {
+  const query = accountSearch.value.trim().toLowerCase();
+  document.querySelectorAll("[data-account-email]").forEach(row => {
+    row.hidden = !row.dataset.accountEmail.toLowerCase().includes(query);
+  });
+}
+accountSearch?.addEventListener("input", filterAccounts);
+document.getElementById("find-account")?.addEventListener("click", filterAccounts);
+
+document.getElementById("show-password")?.addEventListener("click", event => {
+  const field = document.getElementById("secret");
+  const reveal = field.type === "password";
+  field.type = reveal ? "text" : "password";
+  event.currentTarget.setAttribute("aria-pressed", String(reveal));
+  event.currentTarget.setAttribute("aria-label", reveal ? "Ẩn mật khẩu" : "Hiện mật khẩu");
 });

@@ -15,13 +15,11 @@ def scheduler_components(temp_db_path):
     engine, session_factory = init_db(f"sqlite:///{temp_db_path}")
 
     mock_google = MagicMock()
-    mock_cal_sync = MagicMock()
     mock_reminder = MagicMock()
 
     job_service = JobService(
         session_factory=session_factory,
         google_oauth=mock_google,
-        calendar_sync=mock_cal_sync,
         reminder_service=mock_reminder,
     )
 
@@ -34,7 +32,6 @@ def test_scheduler_lifecycle(scheduler_components):
     scheduler = BackgroundScheduler(
         job_service=job_service,
         refresh_interval=1,
-        calendar_interval=1,
         reminder_interval=1,
     )
 

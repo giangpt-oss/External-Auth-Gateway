@@ -13,13 +13,13 @@ Measures:
 from __future__ import annotations
 
 import collections
+import logging
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
-import logging
+from dataclasses import dataclass, field
 from threading import Lock
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +27,27 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExecutionTelemetry:
     request_id: str
-    job_id: Optional[str] = None
-    operation_id: Optional[str] = None
-    service: Optional[str] = None
-    operation: Optional[str] = None
-    protocol: Optional[str] = None
-    
+    job_id: str | None = None
+    operation_id: str | None = None
+    service: str | None = None
+    operation: str | None = None
+    protocol: str | None = None
+
     # Measured durations in milliseconds (None if stage did not execute in this run)
-    classification_ms: Optional[float] = None
-    queue_wait_ms: Optional[float] = None
-    token_refresh_ms: Optional[float] = None
-    external_call_ms: Optional[float] = None
-    internal_retrieval_ms: Optional[float] = None
-    permission_check_ms: Optional[float] = None
-    llm_synthesis_ms: Optional[float] = None
-    
+    classification_ms: float | None = None
+    queue_wait_ms: float | None = None
+    token_refresh_ms: float | None = None
+    external_call_ms: float | None = None
+    internal_retrieval_ms: float | None = None
+    permission_check_ms: float | None = None
+    llm_synthesis_ms: float | None = None
+    embedding_query_ms: float | None = None
+    drive_permission_check_ms: float | None = None
+    drive_content_decrypt_ms: float | None = None
+
     total_duration_ms: float = 0.0
     success: bool = True
-    error_code: Optional[str] = None
+    error_code: str | None = None
     created_at: float = field(default_factory=time.time)
 
     def finish(self) -> ExecutionTelemetry:
@@ -57,6 +60,9 @@ class ExecutionTelemetry:
                 self.internal_retrieval_ms,
                 self.permission_check_ms,
                 self.llm_synthesis_ms,
+                self.embedding_query_ms,
+                self.drive_permission_check_ms,
+                self.drive_content_decrypt_ms,
             ]
             self.total_duration_ms = round(sum(s for s in stages if s is not None), 2)
         return self
@@ -72,8 +78,10 @@ class TelemetryStore:
     def record(self, telemetry: ExecutionTelemetry) -> None:
         telemetry.finish()
         self._records.append(telemetry)
-        def _fmt(val: Optional[float]) -> str:
+
+        def _fmt(val: float | None) -> str:
             return f"{val:.1f}ms" if val is not None else "-"
+
         logger.info(
             "TELEMETRY: req_id=%s job_id=%s op_id=%s service=%s op=%s proto=%s "
             "classif=%s queue=%s oauth=%s ext=%s int=%s perm=%s llm=%s total=%.1fms success=%s",
@@ -94,13 +102,13 @@ class TelemetryStore:
             telemetry.success,
         )
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Aggregate count, p50 and p95 across measured stages (skipping non-executed stages)."""
         records = list(self._records)
         if not records:
             return {"total_records": 0, "stages": {}}
 
-        def _calc_p(vals: List[float], p: float) -> float:
+        def _calc_p(vals: list[float], p: float) -> float:
             if not vals:
                 return 0.0
             s = sorted(vals)
@@ -115,9 +123,12 @@ class TelemetryStore:
             "internal_retrieval_ms",
             "permission_check_ms",
             "llm_synthesis_ms",
+            "embedding_query_ms",
+            "drive_permission_check_ms",
+            "drive_content_decrypt_ms",
             "total_duration_ms",
         ]
-        summary: Dict[str, Any] = {}
+        summary: dict[str, Any] = {}
         for stage in stage_names:
             vals = [getattr(r, stage) for r in records if getattr(r, stage) is not None]
             if vals:
@@ -140,8 +151,9 @@ class TelemetryStore:
 telemetry_store = TelemetryStore()
 
 
-
-active_execution: ContextVar[ExecutionTelemetry | None] = ContextVar("workspace_execution", default=None)
+active_execution: ContextVar[ExecutionTelemetry | None] = ContextVar(
+    "workspace_execution", default=None
+)
 _stage_lock = Lock()
 
 

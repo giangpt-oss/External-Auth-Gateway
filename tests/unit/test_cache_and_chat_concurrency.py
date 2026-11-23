@@ -24,7 +24,11 @@ def thread_safe_db():
     )
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
-    return Session
+    try:
+        yield Session
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_identity_cache_hit_and_ttl():

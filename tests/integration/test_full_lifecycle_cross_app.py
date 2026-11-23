@@ -287,11 +287,11 @@ def test_full_lifecycle_cross_app_task_create_preview_confirm(full_lifecycle_env
     assert len(msgs) >= 1
     preview_body = msgs[-1].get("text", "")
     assert "Bản xem trước tạo công việc cá nhân" in preview_body
-    assert "/confirm c_" in preview_body
+    assert "c_" in preview_body
 
-    # Trích xuất confirmation ID
+    # Trích xuất confirmation ID (hỗ trợ cả định dạng "/confirm c_..." và "Mã tham chiếu: c_...")
     import re
-    m = re.search(r"/confirm\s+(c_[a-f0-9]+)", preview_body)
+    m = re.search(r"\b(c_[a-f0-9]+)\b", preview_body)
     assert m is not None
     conf_id = m.group(1)
 
@@ -329,7 +329,7 @@ def test_full_lifecycle_relink_invalidates_pending_confirmation(full_lifecycle_e
     msgs = wait_for_mock_tg_messages(env, min_count=1)
     preview_body = msgs[-1].get("text", "")
     import re
-    m = re.search(r"/confirm\s+(c_[a-f0-9]+)", preview_body)
+    m = re.search(r"\b(c_[a-f0-9]+)\b", preview_body)
     assert m is not None
     conf_id = m.group(1)
 

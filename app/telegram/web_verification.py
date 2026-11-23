@@ -6,14 +6,16 @@ import logging
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from urllib.parse import urlencode
 
 import httpx
+import qrcode
 from cryptography.fernet import InvalidToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
-from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Cookie, Depends, Form, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from google.auth import jwt
 from google.auth.exceptions import GoogleAuthError, InvalidValue
 from sqlalchemy.exc import IntegrityError
@@ -24,14 +26,18 @@ from app.config import Settings
 from app.models import TELEGRAM_WEB_BINDING_PREFIX, LinkToken, Session, TelegramConnection, User
 from app.odoo.client import OdooClient, OdooError, OdooNetworkError
 from app.odoo.service import OdooService
-from app.portal.routes import templates
-from app.security import decrypt_secret, encrypt_secret, ensure_utc, generate_secure_token, hash_token
+from app.security import (
+    decrypt_secret,
+    encrypt_secret,
+    ensure_utc,
+    generate_secure_token,
+    hash_token,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Telegram Bot"])
 ISSUER = "https://oauth.telegram.org"
 PURPOSE = "telegram_web_oauth"
-BROWSER_CODE_PURPOSE = "telegram_browser_code"
 CALLBACK_PATH = "/oauth/telegram/callback"
 
 
@@ -54,17 +60,22 @@ def _error(message: str) -> RedirectResponse:
 @router.post("/connections/telegram/verify")
 def start_verification(
     request: Request,
-    csrf_token: str = Form(...),
+    csrf_token: str | None = Form(None),
+    x_csrf_token: str | None = Header(None, alias="X-CSRF-Token"),
     session_id: str | None = Cookie(None),
     auth: AuthService = Depends(get_auth_service),
 ):
     user, session = _session(auth, session_id)
-    if not secrets.compare_digest(csrf_token.encode(), session.csrf_secret.encode()):
+    token = csrf_token or x_csrf_token or ""
+    if not token or not secrets.compare_digest(token.encode(), session.csrf_secret.encode()):
         raise HTTPException(403, "Yêu cầu xác minh không hợp lệ.")
     settings = request.app.state.settings
     if not settings.telegram_web_configured:
-        return _error("Chưa cấu hình xác minh Telegram trên web.")
+        if "application/json" in request.headers.get("Accept", ""):
+            raise HTTPException(400, "Chưa cấu hình xác minh bằng ứng dụng Telegram.")
+        return _error("Chưa cấu hình xác minh bằng ứng dụng Telegram.")
 
+    expires_at = datetime.now(UTC) + timedelta(minutes=5)
     state = generate_secure_token()
     verifier = generate_secure_token()
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
@@ -75,7 +86,7 @@ def start_verification(
         db.add(LinkToken(
             purpose=PURPOSE, user_id=user.id, session_id=session.id, token_hash=hash_token(state),
             encrypted_pkce_verifier=encrypt_secret(verifier, settings.ENCRYPTION_KEY),
-            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            expires_at=expires_at,
         ))
         db.commit()
     query = urlencode({
@@ -87,7 +98,19 @@ def start_verification(
         "code_challenge": challenge.rstrip(b"=").decode("ascii"),
         "code_challenge_method": "S256",
     })
-    return RedirectResponse(f"{ISSUER}/auth?{query}", status_code=303)
+    url = f"{ISSUER}/auth?{query}"
+    if "application/json" in request.headers.get("Accept", ""):
+        png = BytesIO()
+        qrcode.make(url).save(png, format="PNG")
+        return JSONResponse(
+            {
+                "link_url": url,
+                "qr_code_data_uri": "data:image/png;base64," + base64.b64encode(png.getvalue()).decode("ascii"),
+                "expires_at": expires_at.isoformat(),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+    return RedirectResponse(url, status_code=303)
 
 
 class TelegramIdentityRejected(ValueError):
@@ -183,93 +206,6 @@ def _store_binding(db, user_id: int, claims: dict, chat_id: int | None = None) -
     connection.binding_id = f"{TELEGRAM_WEB_BINDING_PREFIX}{secrets.token_hex(16)}"
     connection.status = "connected"
     db.commit()
-
-
-@router.post("/connections/telegram/verify-browser")
-def start_browser_verification(
-    request: Request,
-    csrf_token: str = Form(...),
-    session_id: str | None = Cookie(None),
-    auth: AuthService = Depends(get_auth_service),
-):
-    user, session = _session(auth, session_id)
-    if not secrets.compare_digest(csrf_token.encode(), session.csrf_secret.encode()):
-        raise HTTPException(403, "Yêu cầu xác minh không hợp lệ.")
-    settings = request.app.state.settings
-    username = settings.TELEGRAM_BOT_USERNAME.strip().lstrip("@")
-    if not settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD or not re.fullmatch(r"[A-Za-z0-9_]+", username):
-        return _error("Gateway chưa được cấu hình xác minh bằng Telegram Web.")
-
-    code = generate_secure_token(24)
-    with request.app.state.session_factory() as db:
-        db.query(LinkToken).filter_by(
-            purpose=BROWSER_CODE_PURPOSE, user_id=user.id, session_id=session.id, used_at=None,
-        ).delete(synchronize_session=False)
-        db.add(LinkToken(
-            purpose=BROWSER_CODE_PURPOSE, user_id=user.id, session_id=session.id,
-            token_hash=hash_token(code), expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        ))
-        db.commit()
-    return templates.TemplateResponse(
-        request=request, name="telegram_browser_verification.html",
-        context={"user": user, "csrf_token": csrf_token, "bot_username": username, "code": code},
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
-    )
-
-
-def confirm_browser_code(session_factory, settings: Settings, chat_id: int,
-                         telegram_id: int, username: str | None, code: str) -> str:
-    invalid = "Mã xác minh không hợp lệ, đã hết hạn hoặc đã được dùng."
-    if (
-        not settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD
-        or type(telegram_id) is not int
-        or telegram_id <= 0
-        or chat_id != telegram_id
-        or not re.fullmatch(r"[A-Za-z0-9_-]{32}", code)
-    ):
-        return invalid
-
-    with session_factory() as db:
-        now = datetime.now(UTC)
-        attempt = db.query(LinkToken).join(Session, LinkToken.session_id == Session.id).filter(
-            LinkToken.token_hash == hash_token(code), LinkToken.purpose == BROWSER_CODE_PURPOSE,
-            LinkToken.used_at.is_(None), LinkToken.expires_at > now,
-            Session.user_id == LinkToken.user_id, Session.expires_at > now,
-        ).first()
-        if not attempt:
-            return invalid
-        user = db.get(User, attempt.user_id)
-        if not user or not user.active or not user.credential:
-            return invalid
-        try:
-            secret = decrypt_secret(user.credential.encrypted_secret, settings.ENCRYPTION_KEY)
-            odoo = OdooService(OdooClient(url=user.tenant, db=user.database))
-            odoo.validate_user_account(user.odoo_uid, secret)
-            expected_id = odoo.get_employee_telegram_id(
-                user.odoo_uid, secret, settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD,
-            )
-        except OdooNetworkError:
-            return "Odoo tạm thời không phản hồi. Vui lòng gửi lại lệnh."
-        except (OdooError, InvalidToken, TypeError, ValueError):
-            return "Không đọc được Telegram ID từ hồ sơ Odoo."
-        if expected_id != telegram_id:
-            return "Telegram ID của tài khoản này không trùng với hồ sơ Odoo."
-
-        now = datetime.now(UTC)
-        active_sessions = db.query(Session.id).filter(
-            Session.user_id == user.id, Session.expires_at > now,
-        ).statement
-        claimed = db.query(LinkToken).filter(
-            LinkToken.id == attempt.id, LinkToken.used_at.is_(None), LinkToken.expires_at > now,
-            LinkToken.session_id.in_(active_sessions),
-        ).update({"used_at": now}, synchronize_session=False)
-        if claimed != 1:
-            return invalid
-        try:
-            _store_binding(db, user.id, {"id": telegram_id, "preferred_username": username}, chat_id)
-        except (ValueError, IntegrityError):
-            return "Tài khoản Telegram này đã được liên kết với hồ sơ khác."
-    return "Đã xác minh Telegram. Quay lại portal Odoo và bấm Kiểm tra kết quả."
 
 
 @router.get(CALLBACK_PATH)

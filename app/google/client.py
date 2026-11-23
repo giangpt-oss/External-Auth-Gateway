@@ -3,7 +3,6 @@ import enum
 import json
 import logging
 import random
-import time
 from typing import Any, Optional
 
 import httpx
@@ -17,8 +16,11 @@ logger = logging.getLogger(__name__)
 class GoogleErrorCode(str, enum.Enum):
     AUTH_EXPIRED = "AUTH_EXPIRED"
     RECONNECT_REQUIRED = "RECONNECT_REQUIRED"
+    MISSING_SCOPE = "MISSING_SCOPE"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+    SERVICE_DISABLED = "SERVICE_DISABLED"
+    INVALID_ARGUMENT = "INVALID_ARGUMENT"
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
     RATE_LIMIT = "RATE_LIMIT"
@@ -70,22 +72,26 @@ class UnifiedGoogleClient:
         max_user_reads: int = 2,
         max_user_writes: int = 1,
         http_client: Optional[httpx.AsyncClient] = None,
+        circuit_breaker: Optional[Any] = None,
     ):
         self.oauth_service = oauth_service
+        self.circuit_breaker = circuit_breaker
         self.global_semaphore = asyncio.Semaphore(max_global_concurrency)
         self.max_user_reads = max_user_reads
         self.max_user_writes = max_user_writes
         self._user_read_semaphores: dict[int, asyncio.Semaphore] = {}
         self._user_write_semaphores: dict[int, asyncio.Semaphore] = {}
+        self.http2_enabled = True
         self._http_client = http_client or httpx.AsyncClient(
+            http2=True,
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
-            timeout=120.0,
+            timeout=httpx.Timeout(timeout=120.0, connect=3.0, pool=2.0),
         )
 
-    def get_user_google_connection(self, user_id: int):
+    def get_user_google_connection(self, user_id: int, account_id: Optional[int] = None):
         with self.oauth_service.session_factory() as db:
-            from app.models import GoogleConnection
-            return db.query(GoogleConnection).filter_by(user_id=user_id).first()
+            from app.google.account_resolver import GoogleAccountResolver
+            return GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=account_id)
 
     def _get_user_semaphore(self, user_id: int, is_write: bool) -> asyncio.Semaphore:
         if is_write:
@@ -112,7 +118,25 @@ class UnifiedGoogleClient:
         content: Optional[bytes] = None,
         is_write: bool = False,
         timeout: float = 120.0,
+        service: Optional[str] = None,
     ) -> Any:
+        # Determine service from url if not provided
+        svc = service or "google_general"
+        if not service:
+            for s in ("calendar", "gmail", "drive", "docs", "sheets", "slides"):
+                if s in url:
+                    svc = s
+                    break
+
+        # Check circuit breaker
+        if self.circuit_breaker and not self.circuit_breaker.is_available(user_id, svc):
+            raise GoogleApiError(
+                error_code=GoogleErrorCode.SERVICE_TEMPORARY,
+                message=f"Circuit breaker tripped for {svc} on account {user_id}. Calls temporarily paused to avoid cascading failures.",
+                status_code=503,
+                retryable=False,
+            )
+
         user_sem = self._get_user_semaphore(user_id, is_write)
         max_attempts = 1 if is_write else 3
         attempt = 0
@@ -144,6 +168,8 @@ class UnifiedGoogleClient:
                     try:
                         resp = await self._http_client.send(req)
                     except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                        if self.circuit_breaker:
+                            self.circuit_breaker.record_failure(user_id, svc)
                         if is_write:
                             raise GoogleApiError(
                                 error_code=GoogleErrorCode.UNKNOWN_RESULT,
@@ -170,6 +196,8 @@ class UnifiedGoogleClient:
                             refreshed_on_401 = True
                             # Thử lại ngay lập tức với token mới
                             continue
+                        if self.circuit_breaker:
+                            self.circuit_breaker.record_failure(user_id, svc)
                         raise GoogleApiError(
                             error_code=GoogleErrorCode.AUTH_EXPIRED,
                             message="Phiên xác thực Google đã hết hạn hoặc bị thu hồi. Vui lòng kết nối lại trên Portal.",
@@ -180,6 +208,8 @@ class UnifiedGoogleClient:
 
                     # 2. Xử lý 429 Rate Limit hoặc 5xx Server Error
                     if resp.status_code == 429 or resp.status_code >= 500:
+                        if self.circuit_breaker:
+                            self.circuit_breaker.record_failure(user_id, svc)
                         if is_write:
                             err_code = GoogleErrorCode.UNKNOWN_RESULT if resp.status_code >= 500 else GoogleErrorCode.RATE_LIMIT
                             raise GoogleApiError(
@@ -207,12 +237,26 @@ class UnifiedGoogleClient:
                             raw_error=resp.text,
                         )
 
-                    # 3. Xử lý 403 Forbidden / Quota Exceeded
+                    # 3. Xử lý 403 Forbidden / Quota Exceeded / Missing Scope / Disabled Service
                     if resp.status_code == 403:
                         err_text = resp.text.lower()
                         is_quota = "quota" in err_text or "ratelimitexceeded" in err_text
-                        err_code = GoogleErrorCode.QUOTA_EXCEEDED if is_quota else GoogleErrorCode.PERMISSION_DENIED
-                        msg = "Tài khoản Google đã vượt hạn mức quota." if is_quota else "Chưa được cấp quyền truy cập tài nguyên Google này."
+                        is_scope = "insufficient" in err_text or "scope" in err_text
+                        is_disabled = "disabled" in err_text or "has not been used in project" in err_text
+
+                        if is_quota:
+                            err_code = GoogleErrorCode.QUOTA_EXCEEDED
+                            msg = "Tài khoản Google đã vượt hạn mức quota."
+                        elif is_scope:
+                            err_code = GoogleErrorCode.MISSING_SCOPE
+                            msg = "Tài khoản Google chưa được cấp đủ scope quyền truy cập cho thao tác này."
+                        elif is_disabled:
+                            err_code = GoogleErrorCode.SERVICE_DISABLED
+                            msg = "Dịch vụ Google API tương ứng chưa được kích hoạt trên dự án Google Cloud."
+                        else:
+                            err_code = GoogleErrorCode.PERMISSION_DENIED
+                            msg = "Chưa được cấp quyền truy cập tài nguyên Google này."
+
                         raise GoogleApiError(
                             error_code=err_code,
                             message=msg,
@@ -278,6 +322,24 @@ class GoogleClient:
     def __init__(self, oauth_service: GoogleOAuthService):
         self.oauth_service = oauth_service
         self.unified_client = UnifiedGoogleClient(oauth_service=oauth_service)
+        # Persistent synchronous HTTP connection pool with HTTP/2 and 3s connect, 2s pool timeouts
+        self._http_pool = httpx.Client(
+            http2=True,
+            timeout=httpx.Timeout(25.0, connect=3.0, pool=2.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
+        )
+
+    def close(self):
+        if hasattr(self, "_http_pool") and not self._http_pool.is_closed:
+            self._http_pool.close()
+
+    def get_user_google_connection(self, user_id: int, account_id: int | None = None):
+        from app.workspace.selection_manager import current_account_pin
+
+        pin = current_account_pin(user_id)
+        return self.unified_client.get_user_google_connection(
+            user_id, account_id=account_id if account_id is not None else pin.account_id if pin else None,
+        )
 
     def _request(
         self,
@@ -289,25 +351,27 @@ class GoogleClient:
         headers: dict[str, str] | None = None,
         retry_on_401: bool = True,
     ) -> httpx.Response:
-        token = self.oauth_service.get_valid_access_token(user_id)
+        from app.workspace.selection_manager import current_account_pin
+
+        pin = current_account_pin(user_id)
+        account = {"google_account_id": pin.account_id} if pin else {}
+        token = self.oauth_service.get_valid_access_token(user_id, **account)
         req_headers = headers.copy() if headers else {}
         req_headers["Authorization"] = f"Bearer {token}"
 
         with outbound_slot(user_id, write=method not in {"GET", "HEAD"}):
-            resp = httpx.request(
+            resp = self._http_pool.request(
                 method, url, params=params, json=json_data, headers=req_headers, timeout=25.0
             )
 
         # Retry once on 401 if token expired unexpectedly
         if resp.status_code == 401 and retry_on_401:
-            # Force refresh by expiring the token in memory/DB or calling get_valid_access_token
-            # In our implementation, we can retry with a refreshed token
             try:
-                # Discard current access token and re-fetch
-                token = self.oauth_service.get_valid_access_token(user_id)
+                # Discard current access token and re-fetch with force_refresh=True
+                token = self.oauth_service.get_valid_access_token(user_id, force_refresh=True, **account)
                 req_headers["Authorization"] = f"Bearer {token}"
                 with outbound_slot(user_id, write=method not in {"GET", "HEAD"}):
-                    resp = httpx.request(
+                    resp = self._http_pool.request(
                         method, url, params=params, json=json_data, headers=req_headers, timeout=25.0
                     )
             except Exception:
@@ -423,11 +487,6 @@ class GoogleClient:
         return resp.json()
 
     # --- Gmail API ---
-    def get_user_google_connection(self, user_id: int):
-        from app.models import GoogleConnection
-
-        with self.oauth_service.session_factory() as db:
-            return db.query(GoogleConnection).filter_by(user_id=user_id).first()
 
     def check_has_scope(self, user_id: int, scope_fragment: str) -> bool:
         conn = self.get_user_google_connection(user_id)

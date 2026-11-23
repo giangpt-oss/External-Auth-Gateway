@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from threading import Lock
 
 from fastapi import Depends, FastAPI, status
 from fastapi.responses import JSONResponse
@@ -25,6 +26,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
         app.state.engine = engine
         app.state.session_factory = session_factory
+        if settings.DRIVE_INDEX_ENABLED:
+            import httpx
+            app.state.drive_http_client = httpx.AsyncClient(http2=True, timeout=30)
 
         report_worker = None
         quote_worker = None
@@ -49,10 +53,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         scheduler = None
         ai_worker = None
+        google_client = None
+        odoo_client = None
         poller_stop_event = None
         if settings.APP_ENV != "test":
             from app.calendar.reminders import ReminderService
-            from app.calendar.service import CalendarSyncService
             from app.google.client import GoogleClient
             from app.google.oauth import GoogleOAuthService
             from app.jobs.scheduler import BackgroundScheduler
@@ -73,12 +78,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             odoo_client = OdooClient(url=settings.ODOO_URL, db=settings.ODOO_DB)
             tele_client = TelegramClient(bot_token=settings.TELEGRAM_BOT_TOKEN)
 
-            cal_sync = CalendarSyncService(
-                session_factory=session_factory,
-                odoo_client=odoo_client,
-                google_client=google_client,
-                encryption_key=settings.ENCRYPTION_KEY or "dev_dummy_key_000000000000000000000=",
-            )
             reminder = ReminderService(
                 session_factory=session_factory,
                 telegram_client=tele_client,
@@ -89,13 +88,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             job_service = JobService(
                 session_factory=session_factory,
                 google_oauth=google_oauth,
-                calendar_sync=cal_sync,
                 reminder_service=reminder,
             )
             scheduler = BackgroundScheduler(
                 job_service=job_service,
                 refresh_interval=settings.REFRESH_JOB_SECONDS,
-                calendar_interval=settings.CALENDAR_JOB_SECONDS,
                 reminder_interval=settings.REMINDER_JOB_SECONDS,
             )
             scheduler.start()
@@ -174,12 +171,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             quote_execution_worker.stop()
         if workspace_worker:
             await workspace_worker.stop()
+        if settings.DRIVE_INDEX_ENABLED:
+            await app.state.drive_http_client.aclose()
         if poller_stop_event:
             poller_stop_event.set()
         if ai_worker:
             ai_worker.stop()
         if scheduler:
             scheduler.stop()
+        workspace_service = getattr(app.state, "workspace_service", None)
+        if workspace_service is not None:
+            workspace_service.close()
+        gateway_google_client = getattr(app.state, "google_client", None)
+        for client in (gateway_google_client, google_client):
+            if client is not None:
+                client.close()
+                await client.unified_client.close()
+        if odoo_client is not None:
+            odoo_client.close()
+        for client in app.state.odoo_clients.values():
+            client.close()
         engine.dispose()
 
     app = FastAPI(
@@ -191,6 +202,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = session_factory
+    app.state.outbound_clients_lock = Lock()
+    app.state.odoo_clients = {}
 
     from app.workspace.network_slots import NetworkSlots, network_slots, outbound_user_id
 

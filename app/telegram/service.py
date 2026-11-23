@@ -198,7 +198,7 @@ class TelegramService:
                     else:
                         self._handle_start_help(chat_id, telegram_user_id)
                 elif base_cmd == "/verify":
-                    self._handle_browser_verification(chat_id, telegram_user_id, username, cmd_tokens)
+                    self._redirect_legacy_verification(chat_id)
                 elif base_cmd == "/help":
                     self._handle_help(chat_id)
                 elif base_cmd == "/status":
@@ -233,20 +233,25 @@ class TelegramService:
         quote_choice = re.fullmatch(r"(qe|qs):([0-9a-f]{24})", data) if isinstance(data, str) else None
         old_approval_choice = re.fullmatch(r"qa:([0-9a-f]{24})", data) if isinstance(data, str) else None
         approval_choice = re.fullmatch(r"(qg|qr):([0-9a-f]{24})", data) if isinstance(data, str) else None
+        opt_choice = data[4:].strip() if isinstance(data, str) and data.startswith("opt:") and len(data) > 4 else None
         message = callback.get("message") or {}
         actor = callback.get("from") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
         result = {"status": "ignored", "reason": "Invalid confirmation callback"}
+        is_private_human = (
+            type(chat_id) is int
+            and chat_id == actor.get("id")
+            and chat.get("type") == "private"
+            and not actor.get("is_bot")
+        )
         if old_approval_choice:
             if isinstance(callback_id, str) and callback_id:
                 self.telegram_client.answer_callback_query(
                     callback_id, 'Nút cũ đã hết hiệu lực. Hãy gửi lại PDF để xác nhận gửi duyệt.')
             return {"status": "ignored", "reason": "Superseded quotation approval button"}
-        if (approval_choice and type(chat_id) is int and chat_id == actor.get('id')
-                and chat.get('type') == 'private' and type(message_id) is int
-                and not actor.get('is_bot')):
+        if approval_choice and is_private_human and type(message_id) is int:
             from app.quotations.interaction import QuoteApprovalDelivery
             operation, token = approval_choice.groups()
             with self.session_factory() as db:
@@ -263,9 +268,7 @@ class TelegramService:
             if isinstance(callback_id, str) and callback_id:
                 self.telegram_client.answer_callback_query(callback_id)
             return result
-        if (quote_choice and type(chat_id) is int and chat_id == actor.get('id')
-                and chat.get('type') == 'private' and type(message_id) is int
-                and not actor.get('is_bot')):
+        if quote_choice and is_private_human and type(message_id) is int:
             from app.quotations.interaction import find_pdf_message
             operation, token = quote_choice.groups()
             linked = find_pdf_message(self.session_factory, token, actor['id'], chat_id, message_id)
@@ -283,11 +286,14 @@ class TelegramService:
             if isinstance(callback_id, str) and callback_id:
                 self.telegram_client.answer_callback_query(callback_id)
             return result
-        if (choice and type(chat_id) is int and chat_id == actor.get("id")
-                and chat.get("type") == "private" and not actor.get("is_bot")):
+        if choice and is_private_human:
             command, confirmation_id = choice.groups()
             result = self.ingest_update({"update_id": update.get("update_id"), "message": {
                 "chat": chat, "from": actor, "text": f"/{command} {confirmation_id}",
+            }})
+        elif opt_choice and is_private_human:
+            result = self.ingest_update({"update_id": update.get("update_id"), "message": {
+                "chat": chat, "from": actor, "text": opt_choice,
             }})
         if isinstance(callback_id, str) and callback_id:
             self.telegram_client.answer_callback_query(callback_id)
@@ -330,7 +336,7 @@ class TelegramService:
             else:
                 self._handle_start_help(chat_id, telegram_user_id)
         elif base_cmd == "/verify":
-            self._handle_browser_verification(chat_id, telegram_user_id, username, text.split())
+            self._redirect_legacy_verification(chat_id)
         elif base_cmd == "/help":
             self._handle_help(chat_id)
         elif base_cmd == "/status" and len(text.split()) > 1:
@@ -349,19 +355,10 @@ class TelegramService:
         else:
             self._handle_ai_turn(update, chat_id, telegram_user_id, username, text)
 
-    def _handle_browser_verification(
-        self, chat_id: int, telegram_user_id: int, username: str | None, tokens: list[str],
-    ) -> None:
-        from app.telegram.web_verification import confirm_browser_code
-
-        settings = getattr(self, "settings", None)
-        if not settings or len(tokens) != 2:
-            message = "Hãy sao chép lệnh /verify từ portal Odoo."
-        else:
-            message = confirm_browser_code(
-                self.session_factory, settings, chat_id, telegram_user_id, username, tokens[1],
-            )
-        self.telegram_client.send_message(chat_id, message)
+    def _redirect_legacy_verification(self, chat_id: int) -> None:
+        self.telegram_client.send_message(
+            chat_id, "Hãy mở cổng Auth Gateway và chọn Mở ứng dụng Telegram để liên kết.",
+        )
 
     def _handle_pairing(
         self,

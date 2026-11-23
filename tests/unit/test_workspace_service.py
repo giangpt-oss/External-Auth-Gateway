@@ -13,7 +13,23 @@ def make_service(handler, scopes=None):
     google = Mock()
     google.get_user_google_connection.return_value = Mock(status="connected", scopes=" ".join(scopes or ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/documents"]))
     google.oauth_service.get_valid_access_token.return_value = "private-test-token"
-    return WorkspaceService(google, "test-signing-key", transport=httpx.MockTransport(handler))
+    def dispatch(request):
+        if request.url.path == "/mcp/v1":
+            call = json.loads(request.content)
+            if call["method"] == "notifications/initialized":
+                return httpx.Response(202)
+            if call["method"] == "initialize":
+                result = {"protocolVersion": "2025-11-25"}
+            elif call["method"] == "tools/list":
+                result = {"tools": [{"name": name, "inputSchema": {"type": "object"}} for name in (
+                    "read_doc", "update_doc", "search_threads", "list_events", "search_files", "get_values", "read_presentation",
+                )]}
+            else:
+                return handler(request)
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": call["id"], "result": result})
+        return handler(request)
+
+    return WorkspaceService(google, "test-signing-key", transport=httpx.MockTransport(dispatch))
 
 
 def test_service_module_exists():
@@ -30,7 +46,8 @@ def test_google_read_uses_fixed_host_and_oauth_header():
         return httpx.Response(200, json={"files": [{"id": "file1", "name": "Test"}], "nextPageToken": "next"})
     result = make_service(handler).read(1, "drive", {"method": "files.list"})
     assert result["status"] == "OK"
-    assert result["data"]["nextPageToken"] == "next"
+    from app.workspace.adapters import decode_cursor
+    assert decode_cursor(result["data"]["nextPageToken"].removeprefix("ws:")) == ("rest", "next")
 
 
 def test_missing_scope_stops_before_network():
@@ -215,3 +232,62 @@ def test_supported_workspace_reads_call_google_mcp(service_name, method, paramet
     service = make_service(handler, [f"https://www.googleapis.com/auth/{scope}"])
     service.use_mcp = True
     assert service.read(1, service_name, {"method": method, "parameters": parameters})["status"] == "OK"
+
+
+def test_workspace_rest_refresh_and_retry_preserve_protocol(monkeypatch):
+    requests = []
+    sleeps = []
+    monkeypatch.setattr("app.workspace.service.time.sleep", sleeps.append)
+
+    def handler(request):
+        requests.append(request.headers["Authorization"])
+        if len(requests) == 1:
+            return httpx.Response(401)
+        if len(requests) == 2:
+            return httpx.Response(429, headers={"Retry-After": "0.7"})
+        return httpx.Response(200, json={"files": []})
+
+    service = make_service(handler)
+    service.google.oauth_service.get_valid_access_token.side_effect = ["expired", "renewed"]
+    result = service.read(1, "drive", {"method": "files.list"})
+    assert result["status"] == "OK"
+    assert requests == ["Bearer expired", "Bearer renewed", "Bearer renewed"]
+    assert sleeps == [0.7]
+    assert service.google.oauth_service.get_valid_access_token.call_args.kwargs == {"force_refresh": True}
+
+
+def test_drive_knowledge_rest_does_not_disable_later_mcp():
+    from app.workspace.drive_knowledge import drive_documents
+
+    hosts = []
+    def handler(request):
+        hosts.append(request.url.host)
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(200, json={"files": []})
+        call = json.loads(request.content)
+        return httpx.Response(200, json={"id": call["id"], "result": {"structuredContent": {"files": []}}})
+
+    service = make_service(handler)
+    service.use_mcp = True
+    assert drive_documents(service, 1, ["policy"])["files"] == []
+    assert service.read(1, "drive", {"method": "files.list"})["status"] == "OK"
+    assert hosts == ["www.googleapis.com", "www.googleapis.com", "drivemcp.googleapis.com"]
+
+
+def test_workspace_cursor_cannot_cross_protocol_after_mcp_failure(monkeypatch):
+    from app.workspace.adapters import encode_cursor
+    from app.workspace.service import WorkspaceError
+
+    requests = []
+    monkeypatch.setattr("app.workspace.service.time.sleep", lambda _: None)
+    def handler(request):
+        requests.append(request.url.host)
+        return httpx.Response(503)
+
+    service = make_service(handler)
+    service.use_mcp = True
+    payload = {"method": "files.list", "parameters": {"pageToken": "ws:" + encode_cursor("rest", "next")}}
+    with pytest.raises(WorkspaceError, match="phân trang") as error:
+        service.read(1, "drive", payload)
+    assert error.value.code == "INVALID_CURSOR"
+    assert requests == []

@@ -16,7 +16,7 @@ FIELDS = "id,name,mimeType,trashed,capabilities(canDownload)"
 
 def drive_documents(service, user_id, terms, file_id=None):
     def read(method, **parameters):
-        return service.read(user_id, "drive", {"method": method, "parameters": parameters})["data"]
+        return service.read(user_id, "drive", {"method": method, "parameters": parameters}, force_rest=True)["data"]
 
     if file_id:
         rows = [read("files.get", fileId=file_id, fields=FIELDS, supportsAllDrives=True)]

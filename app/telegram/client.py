@@ -59,22 +59,47 @@ def normalize_agent_response(payload: Any) -> dict[str, Any]:
         for index, cid in buttons.items()
     ):
         raise ValueError("Invalid confirmation button descriptor")
+    raw_option_buttons = payload.get("option_buttons", {})
+    option_buttons: dict[str, list[str]] = {}
+    if isinstance(raw_option_buttons, dict):
+        for index, opts in raw_option_buttons.items():
+            idx_key = str(index)
+            if idx_key in message_indices and isinstance(opts, list):
+                cleaned_opts = [plain_text(str(o)).strip()[:60] for o in opts if str(o).strip()][:4]
+                if cleaned_opts:
+                    option_buttons[idx_key] = cleaned_opts
     return {"messages": [plain_text(message) for message in messages], "attachments": normalized,
-            "confirmation_buttons": buttons}
+            "confirmation_buttons": buttons, "option_buttons": option_buttons}
 
 
 def agent_delivery_chunks(delivery, split_text):
     chunks = []
+    option_map = delivery.get("option_buttons") or {}
     for index, message in enumerate(delivery["messages"]):
         parts = split_text(message)
         confirmation_id = delivery["confirmation_buttons"].get(str(index))
+        options = option_map.get(str(index))
         if parts and confirmation_id:
             chunks.extend(parts[:-1])
             chunks.append({"type": "confirmation", "text": parts[-1], "confirmation_id": confirmation_id})
+        elif parts and options:
+            chunks.extend(parts[:-1])
+            chunks.append({"type": "options", "text": parts[-1], "option_buttons": options})
         else:
             chunks.extend(parts)
     chunks.extend({"type": "document", **item} for item in delivery["attachments"])
     return chunks
+
+
+def _encode_option_callback(label: str) -> str:
+    """Encode quick-reply option label into Telegram callback_data <= 64 UTF-8 bytes."""
+    prefix = "opt:"
+    budget = 64 - len(prefix)
+    encoded = label.encode("utf-8")
+    if len(encoded) <= budget:
+        return prefix + label
+    trimmed = encoded[:budget].decode("utf-8", errors="ignore").rstrip()
+    return prefix + trimmed
 
 
 class TelegramClient:
@@ -95,6 +120,7 @@ class TelegramClient:
         confirmation_id: str | None = None,
         preserve_text: bool = False,
         reply_markup: dict[str, Any] | None = None,
+        option_buttons: list[str] | None = None,
     ) -> dict[str, Any]:
         if not self.bot_token:
             _logger.warning("Telegram Bot Token is not configured. Skipping send_message.")
@@ -114,6 +140,14 @@ class TelegramClient:
             ]]}
         elif reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        elif option_buttons:
+            rows = [
+                [{"text": opt, "callback_data": _encode_option_callback(opt)}]
+                for opt in option_buttons[:4]
+                if opt
+            ]
+            if rows:
+                payload["reply_markup"] = {"inline_keyboard": rows}
 
         try:
             resp = httpx.post(url, json=payload, timeout=15.0)

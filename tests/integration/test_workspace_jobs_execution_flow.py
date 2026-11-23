@@ -54,6 +54,7 @@ def integrated_env(tmp_path, monkeypatch):
         TELEGRAM_BOT_USERNAME="TestBot",
         TELEGRAM_WEBHOOK_SECRET="expected_webhook_secret_xyz",
         AGENT_TO_GATEWAY_SECRET=agent_secret,
+        GATEWAY_TO_AGENT_SECRET="fixture-only-gateway-to-agent-secret",
         GOOGLE_WORKSPACE_MCP_ENABLED=False,
     )
     app = create_app(settings)
@@ -295,3 +296,63 @@ async def test_end_to_end_jobs_flow_read_prepare_execute_and_invalid(integrated_
     assert stages["token_refresh_ms"]["count"] == 1
     print(json.dumps(measurements.get_summary(), sort_keys=True))
     await worker.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent", [False, True])
+async def test_deadline_at_dispatch_and_late_confirmation(integrated_env, monkeypatch, sent):
+    import threading
+    from datetime import UTC, datetime, timedelta
+    from app.workspace.network_slots import outbound_slot
+    from app.workspace.service import WorkspaceService
+
+    client, secret, worker, _, sf, key, _ = integrated_env
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    sends = []
+
+    def write(self, user_id, service, payload):
+        try:
+            if not sent:
+                entered.set()
+                assert release.wait(10)
+            with outbound_slot(user_id, write=True):
+                sends.append(user_id)
+                if sent:
+                    entered.set()
+                    assert release.wait(10)
+                return {"status": "OK", "data": {"id": "confirmed-fixture"}}
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(WorkspaceService, "execute", write)
+    payload = {"action": "execute", "_ticket": "fixture", "operation_id": "late-op"}
+    from app.security import encrypt_secret
+    with sf.begin() as db:
+        db.add(WorkspaceJob(job_id="late-job", user_id=1, request_id="late-request", service="calendar",
+                            operation="events.insert", action="execute", operation_id="late-op", is_write=True,
+                            payload_encrypted=encrypt_secret(json.dumps(payload), key),
+                            deadline_at=datetime.now(UTC) + timedelta(seconds=1)))
+    task = asyncio.create_task(worker.process_one_cycle())
+    try:
+        assert await asyncio.to_thread(entered.wait, 4)
+        await task
+        endpoint = "/internal/v1/users/1/workspace/jobs/late-job"
+        headers = {"Authorization": f"Bearer {secret}"}
+        assert client.get(endpoint, headers=headers).json()["status"] == ("unknown_result" if sent else "expired")
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 4)
+        if sent:
+            for _ in range(100):
+                with sf() as db:
+                    persisted = db.query(WorkspaceJob).filter_by(job_id="late-job").one().status
+                if persisted == "completed":
+                    break
+                await asyncio.sleep(.02)
+            assert persisted == "completed"
+            result = client.get(endpoint, headers=headers).json()
+            assert result["status"] == "completed"
+            assert result["result"]["data"]["id"] == "confirmed-fixture"
+        assert sends == ([1] if sent else [])
+    finally:
+        release.set()
+        await worker.stop()

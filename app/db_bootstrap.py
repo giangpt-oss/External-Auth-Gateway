@@ -1,9 +1,9 @@
 """Initialize a new PostgreSQL database or upgrade a versioned database."""
 
+from sqlalchemy import inspect, text
+
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect
-
 from app.business import models as business_models  # noqa: F401
 from app.config import Settings
 from app.db import create_app_engine
@@ -18,7 +18,10 @@ def main():
     try:
         tables = set(inspect(engine).get_table_names())
         if not tables:
-            Base.metadata.create_all(engine)
+            with engine.begin() as connection:
+                if engine.dialect.name == "postgresql":
+                    connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                Base.metadata.create_all(connection)
             command.stamp(config, "head")
         elif "alembic_version" in tables:
             command.upgrade(config, "head")

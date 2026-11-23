@@ -6,6 +6,93 @@ README này hướng dẫn cài đặt, cấu hình và vận hành riêng dự 
 
 > **Trạng thái:** bản phát triển có kiểm thử tự động; chưa nghiệm thu toàn bộ với tài khoản thật. Các thao tác ghi còn giới hạn được nêu cuối README.
 
+## Lệnh phát triển
+
+Chạy từ thư mục Gateway sau khi cài `.venv` theo phần [Cài đặt local](#cài-đặt-local).
+
+| Lệnh PowerShell | Tác dụng |
+|---|---|
+| `./scripts/dev.ps1 doctor` | Kiểm tra Python, pytest, Docker daemon và cấu hình Compose. |
+| `./scripts/dev.ps1 up` | Build và khởi động service `gateway`, đợi healthcheck ở cổng `8080`. |
+| `./scripts/dev.ps1 test unit` | Chạy test ngoài `tests/integration` và `tests/contract`. |
+| `./scripts/dev.ps1 test integration` | Chạy kiểm thử tích hợp độc lập của Gateway. |
+| `./scripts/dev.ps1 test contract` | Chạy `tests/contract` để kiểm tra giao diện giữa các thành phần. |
+| `./scripts/dev.ps1 test all` | Chạy các nhóm trên. Đây là mặc định của `test`. |
+| `./scripts/dev.ps1 down` | Dừng service `gateway` và giữ volume SQLite cùng mạng dùng chung `auth_gateway_net`. |
+
+`test` dùng bản sao mã nguồn tạm, Python trong `.venv` và môi trường con riêng để tách cấu hình và database chạy thật. Script trả về mã thoát của pytest. Hai file `test_full_lifecycle_cross_app.py` và `test_live_cross_app_e2e.py` cần repo Agent bên cạnh nên chạy riêng theo phần kiểm thử tích hợp bên dưới. Các fixture PostgreSQL cần URL kiểm thử riêng và tự bỏ qua khi URL chưa được thiết lập.
+
+[tests/contract/workspace-v1.json](tests/contract/workspace-v1.json) là fixture chuẩn của hợp đồng Workspace v1. Khi cập nhật phiên bản hợp đồng, sao chép nguyên tệp tương ứng sang `tests/contract` của Agent. Bài kiểm thử ghép cặp dùng [test_workspace_peer.py](tests/contract/test_workspace_peer.py) ở Gateway và `tests/contract/workspace_peer.py` ở Agent. Cách chạy với PostgreSQL dùng riêng cho kiểm thử nằm trong [hướng dẫn contract](tests/contract/README.md).
+
+Khởi động Gateway trước Agent khi chạy cả hai bằng Compose. Đặt `AI_AGENT_BASE_URL=http://ai-agent:8000` trong `.env` của Gateway và `GATEWAY_BASE_URL=http://gateway:8000` trong `.env` của Agent. Thiết lập cặp secret theo phần [Cấu hình](#cấu-hình). `up` dùng SQLite trong `compose.yaml`. Phần [Docker](#docker) hướng dẫn vận hành tunnel riêng.
+
+## Điểm vào mã nguồn
+
+| Công việc | Tệp |
+|---|---|
+| Khởi tạo ứng dụng và healthcheck | [app/main.py](app/main.py) |
+| Nhận webhook, xếp hàng và chuyển turn Telegram | [app/telegram/routes.py](app/telegram/routes.py), [app/telegram/worker.py](app/telegram/worker.py) |
+| Đổi hợp đồng identity, phân quyền và đọc dữ liệu | [app/internal/identity.py](app/internal/identity.py), [app/internal/google.py](app/internal/google.py), [app/internal/odoo.py](app/internal/odoo.py) |
+| Đổi thực thi hoặc tra cứu trạng thái action | [app/internal/actions.py](app/internal/actions.py) |
+| Thêm operation Workspace | [app/workspace/catalog.json](app/workspace/catalog.json) khai báo method, scope và schema. [app/workspace/service.py](app/workspace/service.py) kiểm tra quyền và điều phối provider. |
+| Đổi luồng job Workspace hoặc chọn tài khoản Google | [app/workspace/routes.py](app/workspace/routes.py), [app/workspace/selection_manager.py](app/workspace/selection_manager.py), [app/workspace/worker.py](app/workspace/worker.py) |
+| Sửa truy xuất Drive, xếp hạng hoặc quyền xem tài liệu | [app/workspace/drive_retriever.py](app/workspace/drive_retriever.py), [app/workspace/drive_permissions.py](app/workspace/drive_permissions.py), [app/workspace/drive_runtime.py](app/workspace/drive_runtime.py) |
+| Sửa xác nhận draft | Xem bảng điểm vào mã nguồn của Agent. Gateway kiểm tra quyền, tài khoản và operation ID tại API action hoặc lớp Workspace. |
+
+### Đọc dữ liệu
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant G as Gateway
+    participant A as Agent
+    participant P as Odoo hoặc Google
+    T->>G: Update
+    G->>A: Turn với request_id
+    A->>G: Identity contract v2
+    G-->>A: Danh tính, binding và quyền
+    A->>G: Đọc dữ liệu hoặc tạo Workspace job đọc
+    G->>P: Đọc theo quyền đã xác minh
+    G-->>A: Kết quả trực tiếp hoặc callback theo job_id
+    A-->>G: Phản hồi đã định dạng
+    G-->>T: Phản hồi đã định dạng
+```
+
+### Ghi dữ liệu
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant G as Gateway
+    participant A as Agent
+    participant P as Odoo hoặc Google
+    T->>G: Yêu cầu ghi
+    G->>A: Turn
+    A->>G: Lấy snapshot hoặc Workspace preview khi cần
+    G-->>A: Dữ liệu cho bản xem trước
+    A-->>G: Bản xem trước và mã xác nhận
+    G-->>T: Bản xem trước của Agent
+    T->>G: Xác nhận
+    G->>A: Turn xác nhận
+    A->>G: Action hoặc Workspace job với operation_id đã lưu
+    G->>P: Kiểm tra quyền và thực thi
+    G-->>A: Kết quả hoặc trạng thái để đối soát
+    A-->>G: Trạng thái đã định dạng
+    G-->>T: Trạng thái đã định dạng
+```
+
+### Đối chiếu log với Agent
+
+1. Từ `update_id` của Telegram, tìm `request_id=tg-<update_id>` trong log `TIMING_AI` ở Gateway và log xử lý turn ở Agent.
+2. Với Workspace hoặc Drive, lọc `TELEMETRY` theo `req_id`. Các trường `job_id` và `op_id` trong cùng bản ghi nối log worker với callback Agent và thao tác ghi.
+3. Turn tạo preview và turn xác nhận có `request_id` riêng. Dùng `operation_id` đã lưu trong bản xác nhận để đối chiếu action, trạng thái và lần đối soát. Khi chia sẻ log, dùng các mã tương quan và mã trạng thái.
+
+```powershell
+docker compose logs --since 10m gateway | Select-String -SimpleMatch 'tg-12345'
+# Chạy ở repo Agent
+docker compose logs --since 10m ai-agent | Select-String -SimpleMatch 'tg-12345'
+```
+
 ## Chức năng và trách nhiệm
 
 - Đăng nhập bằng tài khoản và mật khẩu Odoo.
@@ -37,7 +124,7 @@ Chuyển tiếp AI là tích hợp tùy chọn qua HTTP. Ứng dụng nhận yê
 - Google OAuth client, các API Google cần dùng và Telegram bot token.
 - Nếu bật chuyển tiếp AI, cần URL của dịch vụ nhận yêu cầu và hai secret giao tiếp được thống nhất.
 
-Gateway dùng SQLite, không cần PostgreSQL hoặc Redis. Docker và Cloudflare Tunnel là lựa chọn triển khai bổ sung.
+Gateway chạy local với SQLite. Cấu hình PostgreSQL dùng cho luồng Workspace với worker riêng, hàng đợi bền vững và chỉ mục Drive có pgvector. Cloudflare Tunnel là tùy chọn.
 
 ## Cài đặt local
 
@@ -142,30 +229,26 @@ docker compose logs -f gateway
 
 Cấu hình `CLOUDFLARE_TUNNEL_TOKEN` trước khi chạy thêm service `tunnel`.
 
+Khi chạy Workspace với PostgreSQL, dùng [compose.postgres.yaml](compose.postgres.yaml) cùng `compose.yaml`. Cấu hình này có migration, worker Workspace và Drive indexer riêng. Phần kiểm thử ghép cặp bên trên dùng PostgreSQL dành riêng cho test.
+
 Nếu chuyển tiếp tới dịch vụ AI chạy trong container khác, đặt `AI_AGENT_BASE_URL` theo địa chỉ truy cập được từ container gateway. Có thể dùng mạng `auth_gateway_net` và tên service/alias của dịch vụ đích. `localhost` trong container chỉ trỏ về chính container; cổng nội bộ gateway là `8000`.
 
 ## Kiểm thử và kiểm tra mã nguồn (Linting)
 
 ```powershell
-# Kiểm tra định dạng và chuẩn mã nguồn (Ruff sạch 100%, 0 lỗi):
+# Kiểm tra chuẩn mã nguồn.
 .\.venv\Scripts\python.exe -m ruff check app tests
 
-# Chạy toàn bộ test suite của Gateway trong môi trường cô lập (153 passed, 0 failed):
-.\.venv\Scripts\python.exe -B -X utf8 -m pytest -q --disable-warnings --tb=short
+# Chạy các nhóm kiểm thử độc lập của Gateway.
+./scripts/dev.ps1 test all
 
-# (Tùy chọn) Chạy riêng nhóm test tích hợp xuyên dịch vụ:
+# Chạy nhóm tích hợp xuyên dịch vụ khi có repo Agent và cấu hình kiểm thử riêng.
 .\.venv\Scripts\python.exe -m pytest tests/integration/test_full_lifecycle_cross_app.py tests/integration/test_live_cross_app_e2e.py -v
 ```
 
-### Kết quả xác minh và phạm vi đã kiểm chứng
+Kết quả trước và sau đợt tái cấu trúc, gồm các ca kiểm thử còn lỗi và phạm vi lint, nằm trong [báo cáo xác minh](docs/refactor-verification.md).
 
-- **153 test tự động đạt 100%**: Bao gồm unit test, contract API v2, kiểm tra quyền và xác thực Odoo cho API tra cứu trạng thái action (`GET /actions/{operation_id}`), worker idempotency, hàng đợi Telegram đa luồng, xử lý atomic lease, sweep sending và integration cross-app.
-- **Regression test XML-RPC CRM (`test_crm_rpc_domain_regression.py`)**: Đã bổ sung 8 test chuyên biệt với mock XML-RPC khắt khe, xác minh 4 vị trí gọi `search_read` (tạo lead có stage, đọc chi tiết lead, đọc bản ghi trước khi update lead, kiểm tra stage khi update lead) tuân thủ đúng cấu trúc `domain = [("id", "=", record_id)]` và `args = [domain]`. Mock từ chối hoàn toàn domain lồng sai cấu trúc, kiểm tra xung đột `write_date` và bảo đảm không gọi `create`/`write` khi bị từ chối.
-- **Ruff Linting**: Toàn bộ codebase `app` và `tests` đạt chuẩn Ruff sạch hoàn toàn, không còn cảnh báo hoặc lỗi. Exception chaining (`from e` / `from err`) được áp dụng chuẩn hóa trong khi giữ nguyên mã lỗi API và HTTP status code.
-- **Git diff**: Kiểm tra `git diff --check` đạt chuẩn, không có lỗi định dạng hay khoảng trắng thừa.
-
-> **Lưu ý quan trọng về phạm vi kiểm thử:**
-> Toàn bộ 153 test tự động được chạy trong môi trường kiểm thử cô lập (dùng SQLite tạm thời trong bộ nhớ và mock proxy ở tầng biên XML-RPC / Google / Telegram). Kiểm thử tự động chứng minh tính toàn vẹn của logic nghiệp vụ và contract API, nhưng **không thay thế việc nghiệm thu bằng tài khoản thật**. Người dùng cần tự nghiệm thu với tenant Odoo Online thật, tài khoản Google OAuth thật và bot Telegram thật theo checklist bên dưới.
+Các nhóm kiểm thử độc lập dùng SQLite tạm và mô phỏng XML-RPC, Google và Telegram. Bộ hồi quy CRM kiểm tra cấu trúc domain `[("id", "=", record_id)]` trong lời gọi `search_read`, xung đột `write_date` và việc chặn ghi khi bị từ chối. Checklist bên dưới dành cho nghiệm thu trên tài khoản thật.
 
 ## Checklist tự nghiệm thu bằng tài khoản thật (Dành cho người dùng)
 

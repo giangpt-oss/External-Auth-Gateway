@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     ODOO_DB: str = "mycompany"
     DATABASE_URL: str = "sqlite:///./data/gateway.db"
     WORKSPACE_EMBEDDED_WORKER: bool = True
+    DRIVE_INDEX_ENABLED: bool = False
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
     ENCRYPTION_KEY: str = ""
 
     # Google OAuth
@@ -91,6 +94,12 @@ class Settings(BaseSettings):
         if isinstance(self.GOOGLE_WORKSPACE_DOMAINS, str):
             domains = [d.strip() for d in self.GOOGLE_WORKSPACE_DOMAINS.split(",") if d.strip()]
             self.GOOGLE_WORKSPACE_DOMAINS = domains
+
+        if self.DRIVE_INDEX_ENABLED:
+            try:
+                Fernet(self.ENCRYPTION_KEY.encode())
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ValueError("DRIVE_INDEX_ENABLED requires a valid Fernet ENCRYPTION_KEY") from exc
 
         if self.ENABLE_AI_AGENT_FORWARDING:
             if not self.GATEWAY_TO_AGENT_SECRET or not self.AGENT_TO_GATEWAY_SECRET:
