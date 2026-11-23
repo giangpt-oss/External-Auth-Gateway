@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from app.odoo.client import OdooAccessError
+from app.odoo.client import OdooAccessError, OdooError
 from app.quotations.approval import APPROVAL_METHOD, QuotationApproval, approval_control
 
 
@@ -12,6 +12,7 @@ class Client:
         self.visible = True
         self.rule = {'id': 14, 'method': APPROVAL_METHOD, 'action_id': False, 'can_validate': False, 'approver_ids': [24]}
         self.entries, self.requests = [], []
+        self.activities = []
 
     def studio_approval_spec(self, uid, secret, record_id, method, company):
         self.calls.append(('spec', method))
@@ -24,7 +25,23 @@ class Client:
         if model == 'sale.order':
             return [{'id': 85, 'name': 'S00086', 'state': 'draft'}] if self.visible else []
         if model == 'studio.approval.request':
+            if method == 'create':
+                assert args == [{'rule_id': 14, 'res_id': 85}]
+                self.requests = [{'id': 1, 'rule_id': [14, 'Approval'], 'res_id': 85}]
+                return 1
             return self.requests
+        if model == 'mail.activity':
+            if method == 'create':
+                values = args[0]
+                self.activities.append({'id': len(self.activities) + 1,
+                    'user_id': [values['user_id'], 'Approver'],
+                    'summary': values['summary']})
+                return len(self.activities)
+            return self.activities
+        if model == 'ir.model':
+            return [{'id': 8}]
+        if model == 'ir.model.data':
+            return [{'res_id': 4}]
         if method == 'check_approval':
             assert args == ['sale.order', 85, APPROVAL_METHOD, False]
             self.requests = [{'id': 1, 'rule_id': [14, 'Approval'], 'res_id': 85}]
@@ -64,17 +81,64 @@ def test_missing_send_rule_is_configuration_error(setup):
 def test_request_creates_pending_without_confirming_order(setup):
     client, service = setup
     assert service.request(85)['status'] == 'pending'
-    with pytest.raises(OdooAccessError):
-        service.request(85)
+    assert service.request(85)['status'] == 'pending'
+    assert sum(call[1] == 'check_approval' for call in client.calls) == 1
     assert not any(call[0] == 'sale.order' and call[1] == 'action_confirm' for call in client.calls)
 
 
 def test_request_cannot_implicitly_grant_own_approval(setup):
     client, service = setup
+    client.rule['approver_ids'] = [27]
     client.rule['can_validate'] = True
-    with pytest.raises(OdooAccessError):
-        service.request(85)
+    assert service.request(85)['status'] == 'pending'
+    assert any(call[:2] == ('studio.approval.request', 'create') for call in client.calls)
     assert not any(call[1] == 'check_approval' for call in client.calls)
+    assert not any(call[1] == 'set_approval' for call in client.calls)
+    assert {row['user_id'][0] for row in client.activities} == {27}
+    assert service.decide(85, 14, True)['status'] == 'approved'
+
+
+def test_request_readback_failure_recovers_existing_request_without_duplicate(setup):
+    client, service = setup
+    client.rule['approver_ids'] = [27]
+    client.rule['can_validate'] = True
+    original = client.studio_approval_spec
+    failed = False
+
+    def transient(*args):
+        nonlocal failed
+        if client.requests and not failed:
+            failed = True
+            raise OdooError('readback unavailable')
+        return original(*args)
+
+    client.studio_approval_spec = transient
+    with pytest.raises(OdooError, match='readback unavailable'):
+        service.request(85)
+    assert client.requests
+    assert service.request(85)['status'] == 'pending'
+    assert sum(call[:2] == ('studio.approval.request', 'create')
+               for call in client.calls) == 1
+    assert not any(call[0] != 'spec' and call[1] in ('set_approval', 'action_confirm')
+                   for call in client.calls)
+
+
+def test_request_not_reported_pending_if_odoo_did_not_persist_it(setup):
+    client, service = setup
+    client.rule['approver_ids'] = [27]
+    client.rule['can_validate'] = True
+    original = client.execute
+
+    def no_persist(uid, secret, model, method, args, kwargs):
+        if (model, method) == ('studio.approval.request', 'create'):
+            client.calls.append((model, method, args, kwargs))
+            return 1
+        return original(uid, secret, model, method, args, kwargs)
+
+    client.execute = no_persist
+    with pytest.raises(OdooError, match='chưa xác nhận'):
+        service.request(85)
+    assert not client.requests and not client.activities
 
 
 def test_unauthorized_approver_cannot_grant(setup):
@@ -114,10 +178,23 @@ def test_flow_flag_only_enables_quotation_lifecycle():
     from app.business.catalog import ACTIONS
     from app.business.service import enabled
     settings = SimpleNamespace(ENABLE_BUSINESS_ACTIONS=False, ENABLE_QUOTATION_APPROVAL_FLOW=True)
-    assert enabled(settings, ACTIONS['business.sales.request_approval'])
+    assert 'business.sales.request_approval' not in ACTIONS
     assert enabled(settings, ACTIONS['business.sales.send'])
     assert not enabled(settings, ACTIONS['business.sales.delete'])
     assert not enabled(settings, ACTIONS['business.purchases.confirm'])
+
+
+def test_legacy_request_approval_cannot_prepare_or_execute_without_pdf_button():
+    from types import SimpleNamespace
+
+    from app.business.quotation_approval import execute, prepare
+    from app.business.service import Unsupported
+
+    definition = SimpleNamespace(name='business.sales.request_approval')
+    with pytest.raises(Unsupported, match='PDF'):
+        prepare(None, definition, {}, None)
+    with pytest.raises(Unsupported, match='PDF'):
+        execute(None, definition, {}, None, 'old-operation', lambda *args: None)
 
 
 def test_quote_cannot_set_approval_checkbox():

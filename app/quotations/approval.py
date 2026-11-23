@@ -4,6 +4,8 @@ Contracts verified against this tenant's web_studio approval service (Odoo 19).
 Discovery is read-only. check_approval and set_approval are write operations and
 must only be called by the confirmed business-action adapter.
 """
+from datetime import date
+
 from app.odoo.client import OdooAccessError, OdooError
 
 # User chose to keep native Odoo rules unchanged. Reuse the existing internal
@@ -59,7 +61,9 @@ class QuotationApproval:
         self.company_id = company_id
 
     def call(self, model, method, args, **kwargs):
-        kwargs['context'] = {'allowed_company_ids': [self.company_id], 'force_company': self.company_id}
+        context = kwargs.get('context') or {}
+        kwargs['context'] = {**context, 'allowed_company_ids': [self.company_id],
+                             'force_company': self.company_id}
         return self.client.execute(self.uid, self.secret, model, method, args, kwargs)
 
     def inspect(self, record_id, method=APPROVAL_METHOD):
@@ -111,12 +115,66 @@ class QuotationApproval:
         state = self.inspect(record_id)
         if not state['rules']:
             raise OdooAccessError(state['message'])
-        if state['status'] in ('approved', 'pending', 'rejected'):
+        if state['status'] in ('approved', 'rejected'):
             raise OdooAccessError('Báo giá đã có kết quả/yêu cầu duyệt; không tự tạo lại yêu cầu.')
-        if any(rule.get('can_validate') for rule in state['rules']):
-            raise OdooAccessError('Tài khoản có thể duyệt một bước. Hãy chọn thao tác duyệt riêng, tránh tự duyệt khi chỉ yêu cầu cấp trên duyệt.')
-        self.call('studio.approval.rule', 'check_approval', ['sale.order', record_id, APPROVAL_METHOD, False])
+        if state['status'] == 'not_requested':
+            if any(rule.get('can_validate') is True for rule in state['rules']):
+                # check_approval approves immediately for an authorized caller.
+                # Create Studio's request record instead; approval remains a
+                # separate, explicit set_approval action by the approver.
+                order = min(int(rule.get('notification_order') or 1)
+                            for rule in state['rules'])
+                stage = [rule for rule in state['rules']
+                         if int(rule.get('notification_order') or 1) == order]
+                for rule in stage:
+                    self.call('studio.approval.request', 'create', [{
+                        'rule_id': rule['id'], 'res_id': record_id}])
+            else:
+                self.call('studio.approval.rule', 'check_approval',
+                    ['sale.order', record_id, APPROVAL_METHOD, False])
+            state = self.inspect(record_id)
+        if state['status'] != 'pending' or not state['requests']:
+            raise OdooError('Odoo chưa xác nhận yêu cầu duyệt Studio đang chờ.')
+        self.ensure_request_activities(record_id, state)
         return self.inspect(record_id)
+
+    def ensure_request_activities(self, record_id, state):
+        """Reconcile Odoo activities after a request, including on retries."""
+        approved = {entry['rule_id'][0] for entry in state['entries']
+                    if entry.get('approved') is True}
+        remaining = [rule for rule in state['rules'] if rule['id'] not in approved]
+        order = min(int(rule.get('notification_order') or 1) for rule in remaining)
+        stage = [rule for rule in remaining
+                 if int(rule.get('notification_order') or 1) == order]
+        recipients = sorted({uid for rule in stage for uid in rule.get('approver_ids') or []})
+        if not recipients:
+            raise OdooError('Bước duyệt không có người nhận activity Odoo.')
+        rows = self.call('mail.activity', 'search_read', [[
+            ('res_model', '=', 'sale.order'), ('res_id', '=', record_id),
+            ('user_id', 'in', recipients)]], fields=['id', 'user_id', 'summary'])
+        notified = {row['user_id'][0] for row in rows
+                    if 'grant' in str(row.get('summary') or '').casefold()}
+        missing = set(recipients) - notified
+        if not missing:
+            return
+        model = self.call('ir.model', 'search_read', [[('model', '=', 'sale.order')]],
+            fields=['id'], limit=2)
+        todo = self.call('ir.model.data', 'search_read', [[
+            ('module', '=', 'mail'), ('name', '=', 'mail_activity_data_todo'),
+            ('model', '=', 'mail.activity.type')]], fields=['res_id'], limit=2)
+        if len(model) != 1 or len(todo) != 1:
+            raise OdooError('Không xác minh được loại activity và model báo giá trên Odoo.')
+        for uid in sorted(missing):
+            self.call('mail.activity', 'create', [{
+                'res_model_id': model[0]['id'], 'res_id': record_id,
+                'activity_type_id': todo[0]['res_id'], 'user_id': uid,
+                'summary': 'Grant Approval', 'date_deadline': date.today().isoformat()}])
+        confirmed = self.call('mail.activity', 'search_read', [[
+            ('res_model', '=', 'sale.order'), ('res_id', '=', record_id),
+            ('user_id', 'in', recipients), ('summary', '=', 'Grant Approval')]],
+            fields=['id', 'user_id'])
+        if {row['user_id'][0] for row in confirmed} != set(recipients):
+            raise OdooError('Chưa xác minh đủ activity Odoo cho người duyệt.')
 
     def decide(self, record_id, rule_id, approved):
         state = self.inspect(record_id)

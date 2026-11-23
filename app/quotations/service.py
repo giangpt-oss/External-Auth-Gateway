@@ -2,11 +2,13 @@
 
 import math
 import re
-from datetime import date
+import unicodedata
+from datetime import date, datetime
 from typing import Any
 
 from app.odoo.client import OdooAccessError, OdooClient, OdooError, OdooNetworkError
 from app.quotations.approval import approval_control
+from app.quotations.optional import OPTIONAL_FIELDS
 
 
 class QuotationValidationError(ValueError):
@@ -30,13 +32,19 @@ LOOKUPS = {
     "uoms": "uom.uom",
     "fiscal_positions": "account.fiscal.position",
 }
-ORDER_FIELDS = {
+
+
+def _term_key(value: str) -> str:
+    value = unicodedata.normalize('NFD', str(value or '').casefold().replace('đ', 'd'))
+    return ' '.join(''.join(c if c.isalnum() else ' ' for c in value if unicodedata.category(c) != 'Mn').split())
+BASE_ORDER_FIELDS = {
     "partner_id", "partner_invoice_id", "partner_shipping_id", "company_id",
     "currency_id", "pricelist_id", "payment_term_id", "validity_date", "note",
     "fiscal_position_id", "client_order_ref", "origin",
 }
+ORDER_FIELDS = BASE_ORDER_FIELDS | set(OPTIONAL_FIELDS)
 LINE_FIELDS = {"product_id", "name", "product_uom_qty", "product_uom", "product_uom_id", "price_unit", "tax_id", "tax_ids", "customer_lead"}
-SAFE_TYPES = {"char", "text", "html", "integer", "float", "monetary", "boolean", "date", "selection", "many2one"}
+SAFE_TYPES = {"char", "text", "html", "integer", "float", "monetary", "boolean", "date", "datetime", "selection", "many2one", "many2many"}
 ATTRIBUTES = ["string", "type", "required", "readonly", "store", "selection", "relation", "compute"]
 
 
@@ -68,7 +76,7 @@ class QuotationService:
 
     def _rpc(self, model: str, method: str, args: list, company_id: int | None = None, **kwargs):
         if company_id:
-            kwargs["context"] = {"allowed_company_ids": [company_id], "force_company": company_id}
+            kwargs["context"] = {**kwargs.get('context', {}), "allowed_company_ids": [company_id], "force_company": company_id}
         return self.client.execute(self.uid, self.secret, model, method, args, kwargs)
 
     def _schema(self, model: str) -> dict:
@@ -127,6 +135,112 @@ class QuotationService:
                 if (name in base or name.startswith("x_")) and not spec.get("readonly")
                 and not spec.get("compute") and not approval_control(name)}
 
+    def optional_spec(self, field: str, company_id: int | None = None) -> dict:
+        company_id, _ = self._companies(company_id)
+        if field not in OPTIONAL_FIELDS:
+            raise QuotationValidationError('Mục tùy chọn không được hỗ trợ.')
+        label, kind, relation = OPTIONAL_FIELDS[field]
+        spec = self._schema('sale.order').get(field) or {}
+        available = (spec.get('type') == kind and spec.get('relation') == relation
+                     and not spec.get('readonly') and not spec.get('compute')
+                     and bool(self._rpc('sale.order', 'check_access_rights', ['write', False], company_id)))
+        return {'field': field, 'label': label, 'type': kind, 'relation': relation,
+                'available': bool(available), 'company_id': company_id,
+                'options': [{'value': item[0], 'label': item[1]}
+                            for item in spec.get('selection', [])] if kind == 'selection' else [],
+                'message': '' if available else f'{label} không có trường phù hợp hoặc tài khoản không có quyền sửa trên Odoo.'}
+
+    def _optional_domain(self, model: str, company_id: int) -> list:
+        schema = self._schema(model)
+        domain = []
+        if model == 'res.users':
+            domain.append(('company_ids', 'in', [company_id]))
+        elif 'company_id' in schema:
+            domain += ['|', ('company_id', '=', False), ('company_id', '=', company_id)]
+        if 'active' in schema:
+            domain.append(('active', '=', True))
+        if model == 'crm.lead' and 'type' in schema:
+            domain.append(('type', '=', 'opportunity'))
+        return domain
+
+    def optional_candidates(self, field: str, query: str = '', company_id: int | None = None) -> dict:
+        spec = self.optional_spec(field, company_id)
+        if not spec['available'] or spec['type'] not in ('many2one', 'many2many'):
+            raise QuotationValidationError(spec['message'] or 'Mục này không phải danh mục Odoo.')
+        model, company_id = spec['relation'], spec['company_id']
+        schema = self._schema(model)
+        fields = [name for name in ('id', 'name', 'display_name', 'company_id') if name in schema or name == 'id']
+        domain = self._optional_domain(model, company_id)
+        term = query.strip()[:150]
+        if term:
+            domain.append(('display_name', 'ilike', term))
+        rows = self._rpc(model, 'search_read', [domain], company_id, fields=fields,
+                         order='id asc', limit=20, context={'lang': 'vi_VN'})
+        if term and not rows:
+            domain[-1] = ('display_name', 'ilike', term)
+            rows = self._rpc(model, 'search_read', [domain], company_id, fields=fields,
+                             order='id asc', limit=20, context={'lang': 'en_US'})
+        if not rows and term:
+            rows = self._rpc(model, 'search_read', [self._optional_domain(model, company_id)],
+                             company_id, fields=fields, order='id asc', limit=10,
+                             context={'lang': 'vi_VN'})
+        exact = [row for row in rows if term and _term_key(term) in
+                 {_term_key(row.get('name')), _term_key(row.get('display_name'))}]
+        return {'field': field, 'company_id': company_id, 'items': rows,
+                'exact_match_unique': len(exact) == 1 and len(rows) == 1}
+
+    def _optional_record(self, model: str, record_id: int, company_id: int) -> dict:
+        domain = self._optional_domain(model, company_id) + [('id', '=', _id(record_id, model))]
+        schema = self._schema(model)
+        fields = [name for name in ('id', 'name', 'display_name') if name in schema or name == 'id']
+        rows = self._rpc(model, 'search_read', [domain], company_id, fields=fields,
+                         limit=1, context={'lang': 'vi_VN'})
+        if not rows:
+            raise OdooAccessError(f'Không đọc được bản ghi {model} trong công ty được phép.')
+        return rows[0]
+
+    def optional_values(self, supplied: dict, company_id: int, existing: dict | None = None) -> dict:
+        if not isinstance(supplied, dict) or set(supplied) - set(OPTIONAL_FIELDS):
+            raise QuotationValidationError('Mục tùy chọn chưa được hỗ trợ.')
+        result = {}
+        for field, value in supplied.items():
+            spec = self.optional_spec(field, company_id)
+            if not spec['available']:
+                raise QuotationValidationError(spec['message'])
+            kind = spec['type']
+            if kind == 'boolean':
+                if not isinstance(value, bool):
+                    raise QuotationValidationError(f"{spec['label']} phải là Có hoặc Không.")
+                result[field] = value
+            elif kind == 'selection':
+                if not isinstance(value, str) or value not in {item['value'] for item in spec['options']}:
+                    raise QuotationValidationError(f"Giá trị {spec['label']} không có trong lựa chọn Odoo.")
+                result[field] = value
+            elif kind == 'char':
+                if not isinstance(value, str) or not value.strip() or len(value) > 255:
+                    raise QuotationValidationError(f"{spec['label']} phải là văn bản không rỗng, tối đa 255 ký tự.")
+                result[field] = value.strip()
+            elif kind == 'datetime':
+                try:
+                    parsed = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                except (TypeError, ValueError) as exc:
+                    raise QuotationValidationError(f"{spec['label']} phải có dạng YYYY-MM-DD HH:MM:SS theo UTC.") from exc
+                result[field] = parsed.strftime('%Y-%m-%d %H:%M:%S')
+            elif kind == 'many2one':
+                self._optional_record(spec['relation'], value, company_id)
+                result[field] = value
+            elif kind == 'many2many':
+                if (not isinstance(value, list) or not value or len(value) > 30
+                        or any(type(item) is not int or item <= 0 for item in value)
+                        or len(set(value)) != len(value)):
+                    raise QuotationValidationError(f"{spec['label']} cần danh sách ID hợp lệ, không trùng.")
+                for record_id in value:
+                    self._optional_record(spec['relation'], record_id, company_id)
+                result[field] = [(6, 0, value)]
+        if 'incoterm_location' in result and not (supplied.get('incoterm') or (existing or {}).get('incoterm')):
+            raise QuotationValidationError('Địa điểm Incoterm cần chọn Incoterm trước.')
+        return result
+
     def metadata(self, company_id: int | None = None) -> dict:
         company_id, allowed = self._companies(company_id)
         self._check_create()
@@ -138,7 +252,7 @@ class QuotationService:
             fields, unsupported = {}, []
             for name, spec in editable.items():
                 supported = spec.get("type") in SAFE_TYPES or name == "tax_id"
-                if spec.get("type") == "many2one" and spec.get("relation") not in LOOKUPS.values():
+                if spec.get("type") in ("many2one", "many2many") and spec.get("relation") not in (set(LOOKUPS.values()) | {item[2] for item in OPTIONAL_FIELDS.values() if item[2]}):
                     supported = False
                 fields[name] = {k: v for k, v in spec.items() if k != "compute"}
                 fields[name]["supported"] = supported
@@ -157,6 +271,8 @@ class QuotationService:
         company_id, allowed = self._companies(company_id)
         if kind not in LOOKUPS:
             raise QuotationValidationError("Loại tra cứu báo giá không được hỗ trợ.")
+        if kind == 'payment_terms':
+            return self._lookup_payment_terms(query, company_id)
         model = LOOKUPS[kind]
         schema = self._schema(model)
         fields = [f for f in ["id", "display_name", "name", "default_code", "list_price", "uom_id", "currency_id", "company_id", "amount", "amount_type", "price_include", "type_tax_use"] if f in schema or f == "id"]
@@ -169,7 +285,7 @@ class QuotationService:
             domain.append(("type_tax_use", "in", ["sale", "none"]))
         if kind == "products" and "sale_ok" in schema:
             domain.append(("sale_ok", "=", True))
-        if query.strip() and kind in ('partners', 'products', 'pricelists'):
+        if query.strip() and kind in ('partners', 'products', 'pricelists', 'payment_terms'):
             term = query.strip()[:150].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
             searchable = [field for field in ('display_name', 'name', 'default_code') if field in schema]
             if searchable:
@@ -184,7 +300,42 @@ class QuotationService:
             else:
                 domain.append(('display_name', 'ilike', term))
         rows = self._rpc(model, "search_read", [domain], company_id, fields=fields, order="id asc", limit=max(1, min(int(limit), 20)))
-        return {"kind": kind, "company_id": company_id, "items": rows}
+        return {"kind": kind, "company_id": company_id, "items": rows,
+                "unique_query_match": bool(query.strip() and len(rows) == 1)}
+
+    def _lookup_payment_terms(self, query: str, company_id: int) -> dict:
+        model = 'account.payment.term'
+        schema = self._schema(model)
+        domain = ['|', ('company_id', '=', False), ('company_id', '=', company_id)] if 'company_id' in schema else []
+        fields = [field for field in ('id', 'name', 'display_name', 'company_id') if field in schema or field == 'id']
+        user = self._rpc('res.users', 'read', [[self.uid]], fields=['lang'])
+        user_lang = (user[0].get('lang') if user else None) or 'vi_VN'
+        def catalog(lang):
+            return self.client.execute(self.uid, self.secret, model, 'search_read', [domain],
+                {'fields': fields, 'order': 'id asc', 'limit': 200,
+                 'context': {'lang': lang, 'allowed_company_ids': [company_id], 'force_company': company_id}})
+        visible = catalog(user_lang)
+        english = {row['id']: row for row in catalog('en_US')}
+        key = _term_key(query)
+        for row in visible:
+            source = english.get(row['id'], {})
+            row['api_name'] = source.get('name') or source.get('display_name') or ''
+        exact = [row for row in visible if key and key in {
+            _term_key(row.get('name')), _term_key(row.get('display_name')), _term_key(row.get('api_name'))}]
+        if exact:
+            rows = exact
+        else:
+            words = set(key.split())
+            def score(row):
+                names = (_term_key(row.get('name')), _term_key(row.get('api_name')))
+                overlap = max((len(words.intersection(name.split())) for name in names), default=0)
+                # A short request for immediate payment must not favor a partial-payment term.
+                complexity = bool(re.search(r'\d|%|/', ' '.join(names)))
+                penalty = 2 if complexity and not any(word.isdigit() for word in words) else 0
+                return (overlap - penalty, -int(complexity), -row['id'])
+            rows = sorted(visible, key=score, reverse=True)
+        return {'kind': 'payment_terms', 'company_id': company_id, 'items': rows[:20],
+                'exact_match_unique': len(exact) == 1, 'unique_query_match': False}
 
     def _custom(self, model: str, data: Any, company_id: int) -> dict:
         if not isinstance(data, dict):
@@ -230,7 +381,7 @@ class QuotationService:
     def prepare(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise QuotationValidationError("Dữ liệu báo giá không hợp lệ.")
-        unknown = set(payload) - ORDER_FIELDS - {"lines", "custom_fields"}
+        unknown = set(payload) - BASE_ORDER_FIELDS - {"lines", "custom_fields", "optional_fields"}
         if unknown:
             raise QuotationValidationError("Trường báo giá chưa hỗ trợ: " + ", ".join(sorted(unknown)))
         raw_lines = payload.get('lines', [])
@@ -296,15 +447,11 @@ class QuotationService:
                 elif len(payload[name]) > 10000:
                     raise QuotationValidationError("Ghi chú quá dài.")
                 values[name] = payload[name]
-            elif name in order_fields and not order_fields[name].get('required'):
-                values[name] = False
         custom_input = payload.get("custom_fields", {})
         if not isinstance(custom_input, dict):
             raise QuotationValidationError("custom_fields phải là một object.")
         values.update(self._custom('sale.order', custom_input, company_id))
-        for name, spec in meta['models']['sale.order']['fields'].items():
-            if name.startswith('x_') and spec.get('supported') and not spec.get('required') and name not in values:
-                values[name] = False
+        values.update(self.optional_values(payload.get('optional_fields', {}), company_id, payload))
         if not raw_lines:
             missing.append("lines")
         commands, preview_lines, normalized_lines = [], [], []
@@ -399,7 +546,7 @@ class QuotationService:
         values["order_line"] = commands
         normalized = dict(payload, company_id=company_id)
         # Preserve blanks; only technical context and explicitly requested data are frozen.
-        normalized.update({k: v for k, v in values.items() if k in ORDER_FIELDS and v is not False})
+        normalized.update({k: v for k, v in values.items() if k in BASE_ORDER_FIELDS and (v is not False or k in payload.get('optional_fields', {}))})
         normalized['custom_fields'] = dict(custom_input)
         if len(normalized_lines) == len(raw_lines):
             normalized["lines"] = normalized_lines
@@ -422,7 +569,7 @@ class QuotationService:
             'payment_term_id': 'account.payment.term', 'fiscal_position_id': 'account.fiscal.position'}
         rows = []
         custom = payload.get('custom_fields', {})
-        for name in [*labels, *sorted(k for k in meta['models']['sale.order']['fields'] if k.startswith('x_'))]:
+        for name in [*labels, *sorted(k for k in meta['models']['sale.order']['fields'] if k.startswith('x_') and k in payload.get('custom_fields', {}))]:
             value = custom.get(name) if name.startswith('x_') else values.get(name)
             explicit_boolean = name in custom and meta['models']['sale.order']['fields'].get(name, {}).get('type') == 'boolean'
             if value is None or (value is False and not explicit_boolean):
@@ -432,10 +579,23 @@ class QuotationService:
                 value = record.get('display_name') or str(record['id'])
             rows.append({'name': name, 'label': labels.get(name) or meta['models']['sale.order']['fields'][name].get('string', name),
                 'value': value, 'source': 'context' if name in ('company_id', 'currency_id') and name not in payload else 'user' if value is not None else 'blank'})
+        for name, raw in payload.get('optional_fields', {}).items():
+            if name in labels:
+                continue
+            label, kind, relation = OPTIONAL_FIELDS[name]
+            if kind == 'many2one':
+                value = self._optional_record(relation, raw, company_id).get('display_name') or str(raw)
+            elif kind == 'many2many':
+                value = ', '.join(self._optional_record(relation, item, company_id).get('display_name') or str(item) for item in raw)
+            elif kind == 'selection':
+                value = next((item['label'] for item in self.optional_spec(name, company_id)['options'] if item['value'] == raw), str(raw))
+            else:
+                value = raw
+            rows.append({'name': name, 'label': label, 'value': value, 'source': 'user'})
         return rows
 
     def _readback(self, order_id: int, company_id: int) -> dict:
-        fields = [f for f in dict.fromkeys(['id', 'name', 'state', *sorted(ORDER_FIELDS), 'date_order', 'amount_untaxed', 'amount_tax', 'amount_total', 'order_line']) if f in self._schema('sale.order') or f == 'id']
+        fields = [f for f in dict.fromkeys(['id', 'name', 'state', 'write_date', *sorted(ORDER_FIELDS), 'date_order', 'amount_untaxed', 'amount_tax', 'amount_total', 'order_line']) if f in self._schema('sale.order') or f == 'id']
         order = self._record("sale.order", order_id, company_id, fields)
         line_fields = [f for f in ["id", "product_id", "name", "product_uom_qty", "price_unit", "tax_id", "tax_ids", "price_subtotal", "price_total", "product_uom", "product_uom_id", "customer_lead"] if f in self._schema("sale.order.line") or f == "id"]
         order["lines"] = self._rpc("sale.order.line", "read", [order.get("order_line", [])], company_id, fields=line_fields) if order.get("order_line") else []
@@ -518,6 +678,14 @@ class QuotationService:
             differences.append("company_id")
         if values.get('pricelist_id') and _m2o(result.get('pricelist_id')) != values['pricelist_id']:
             differences.append('pricelist_id')
+        for name, supplied in payload.get('optional_fields', {}).items():
+            actual = result.get(name)
+            if OPTIONAL_FIELDS[name][1] == 'many2one':
+                actual = _m2o(actual)
+            elif OPTIONAL_FIELDS[name][1] == 'many2many':
+                actual, supplied = sorted(actual or []), sorted(supplied)
+            if actual != supplied:
+                differences.append('optional_fields.' + name)
         actual_lines = result.get("lines", [])
         if len(actual_lines) != len(values["order_line"]):
             differences.append("line_count")

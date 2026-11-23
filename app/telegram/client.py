@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import Any
@@ -92,6 +93,8 @@ class TelegramClient:
         parse_mode: str = "",
         disable_web_page_preview: bool = True,
         confirmation_id: str | None = None,
+        preserve_text: bool = False,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.bot_token:
             _logger.warning("Telegram Bot Token is not configured. Skipping send_message.")
@@ -101,7 +104,7 @@ class TelegramClient:
         url = self._get_url("sendMessage")
         payload = {
             "chat_id": chat_id,
-            "text": plain_text(text),
+            "text": text if preserve_text else plain_text(text),
             "disable_web_page_preview": disable_web_page_preview,
         }
         if confirmation_id:
@@ -109,6 +112,8 @@ class TelegramClient:
                 {"text": "Xác nhận", "callback_data": f"confirm:{confirmation_id}"},
                 {"text": "Từ chối", "callback_data": f"cancel:{confirmation_id}"},
             ]]}
+        elif reply_markup is not None:
+            payload["reply_markup"] = reply_markup
 
         try:
             resp = httpx.post(url, json=payload, timeout=15.0)
@@ -133,8 +138,11 @@ class TelegramClient:
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise TelegramDeliveryUnknownError(f"Network error connecting to Telegram: {e}") from e
 
-    def answer_callback_query(self, callback_id: str) -> None:
-        self._update_callback_ui("answerCallbackQuery", {"callback_query_id": callback_id})
+    def answer_callback_query(self, callback_id: str, text: str | None = None) -> None:
+        payload = {"callback_query_id": callback_id}
+        if text:
+            payload["text"] = text
+        self._update_callback_ui("answerCallbackQuery", payload)
 
     def clear_inline_keyboard(self, chat_id: int, message_id: int) -> None:
         self._update_callback_ui("editMessageReplyMarkup", {
@@ -158,6 +166,7 @@ class TelegramClient:
         content: bytes,
         caption: str = "",
         content_type: str = "application/octet-stream",
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Upload trusted artifact bytes; never ask Telegram to fetch a URL or path."""
         if not self.bot_token:
@@ -167,9 +176,12 @@ class TelegramClient:
         safe_name = filename.replace("\\", "/").split("/")[-1]
         safe_name = "".join(ch for ch in safe_name if ch.isprintable())[:200] or "report.xlsx"
         try:
+            form = {"chat_id": str(chat_id), "caption": plain_text(caption)[:1024]}
+            if reply_markup is not None:
+                form["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             response = httpx.post(
                 self._get_url("sendDocument"),
-                data={"chat_id": str(chat_id), "caption": plain_text(caption)[:1024]},
+                data=form,
                 files={"document": (safe_name, content, content_type)},
                 timeout=30.0,
             )

@@ -120,6 +120,8 @@ class QuoteExecutionWorker(QuotePreparationWorker):
                 client = TelegramClient(self.settings.TELEGRAM_BOT_TOKEN)
                 document = None
                 if result is not None:
+                    result = QuotationService(ctx.service.client, ctx.user.odoo_uid, ctx.secret)._readback(
+                        result['id'], result['company_id'][0])
                     if getattr(self.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False):
                         try:
                             result['approval'] = read_approval_status(ctx, result)
@@ -131,15 +133,16 @@ class QuoteExecutionWorker(QuotePreparationWorker):
                         document = render_quotation_pdf(ctx, result)
                     except Exception as exc:
                         logging.getLogger(__name__).warning('Quote PDF unavailable: %s', type(exc).__name__)
-                        message += '\nChưa lấy được file PDF. Bạn có thể mở báo giá trên Odoo và chọn In để tải.'
+                        message += '\nChưa lấy được file PDF. Báo giá vẫn đã lưu; nhắn “Gửi lại PDF” để thử xuất và gửi lại đúng bản ghi này.'
                 with self.sf() as db:
                     recipient = bound_telegram_user(db, user_id, scope)
                     if recipient.tenant != tenant or recipient.database != database:
                         raise ValueError('Tài khoản Odoo đã thay đổi.')
                 send_started = True
                 if document:
+                    from app.quotations.interaction import send_pdf_with_buttons
                     filename, content = document
-                    client.send_document(scope.chat_id, filename, content, caption=message, content_type='application/pdf')
+                    send_pdf_with_buttons(client, self.sf, ctx.user, scope, result, filename, content, message)
                 else:
                     client.send_message(scope.chat_id, message)
             delivery = 'delivered'

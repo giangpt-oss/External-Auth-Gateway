@@ -107,7 +107,7 @@ class TelegramService:
             )
             db.commit()
 
-    def ingest_update(self, update: dict[str, Any]) -> dict[str, Any]:
+    def ingest_update(self, update: dict[str, Any], *, _from_quote_callback: bool = False) -> dict[str, Any]:
         """Ingest update idempotently into telegram_updates queue.
         Gateway commands (/start, /help, /status, /crm) are processed immediately.
         Conversational AI turns are stored with status='pending' (or rejected if forwarding disabled).
@@ -134,6 +134,9 @@ class TelegramService:
             or from_user.get("is_bot", False)
         ):
             return {"status": "ignored", "reason": "Non-private or bot message"}
+        if (re.fullmatch(r'/(?:quote_edit|quote_approve|quote_grant|quote_feedback)\s+[0-9a-f]{24}', text)
+                and not _from_quote_callback):
+            return {"status": "ignored", "reason": "Quotation action requires its PDF button"}
 
         # Classify command BEFORE committing to queue
         telegram_user_id = from_user.get("id")
@@ -227,12 +230,59 @@ class TelegramService:
         callback_id = callback.get("id")
         data = callback.get("data")
         choice = re.fullmatch(rf"(confirm|cancel):({CONFIRMATION_ID})", data) if isinstance(data, str) else None
+        quote_choice = re.fullmatch(r"(qe|qs):([0-9a-f]{24})", data) if isinstance(data, str) else None
+        old_approval_choice = re.fullmatch(r"qa:([0-9a-f]{24})", data) if isinstance(data, str) else None
+        approval_choice = re.fullmatch(r"(qg|qr):([0-9a-f]{24})", data) if isinstance(data, str) else None
         message = callback.get("message") or {}
         actor = callback.get("from") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
         result = {"status": "ignored", "reason": "Invalid confirmation callback"}
+        if old_approval_choice:
+            if isinstance(callback_id, str) and callback_id:
+                self.telegram_client.answer_callback_query(
+                    callback_id, 'Nút cũ đã hết hiệu lực. Hãy gửi lại PDF để xác nhận gửi duyệt.')
+            return {"status": "ignored", "reason": "Superseded quotation approval button"}
+        if (approval_choice and type(chat_id) is int and chat_id == actor.get('id')
+                and chat.get('type') == 'private' and type(message_id) is int
+                and not actor.get('is_bot')):
+            from app.quotations.interaction import QuoteApprovalDelivery
+            operation, token = approval_choice.groups()
+            with self.session_factory() as db:
+                row = db.get(QuoteApprovalDelivery, token)
+                conn = db.query(TelegramConnection).filter_by(user_id=row.approver_user_id,
+                    telegram_user_id=actor['id'], private_chat_id=chat_id,
+                    binding_id=row.binding_id, status='connected').first() if row else None
+                valid = bool(row and row.message_id == message_id and row.status == 'pending' and conn)
+            if valid:
+                command = '/quote_grant' if operation == 'qg' else '/quote_feedback'
+                result = self.ingest_update({'update_id': update.get('update_id'), 'message': {
+                    'chat': chat, 'from': actor, 'text': f'{command} {token}'}},
+                    _from_quote_callback=True)
+            if isinstance(callback_id, str) and callback_id:
+                self.telegram_client.answer_callback_query(callback_id)
+            return result
+        if (quote_choice and type(chat_id) is int and chat_id == actor.get('id')
+                and chat.get('type') == 'private' and type(message_id) is int
+                and not actor.get('is_bot')):
+            from app.quotations.interaction import find_pdf_message
+            operation, token = quote_choice.groups()
+            linked = find_pdf_message(self.session_factory, token, actor['id'], chat_id, message_id)
+            if linked:
+                with self.session_factory() as db:
+                    conn = db.query(TelegramConnection).filter_by(user_id=linked['user_id'],
+                        telegram_user_id=actor['id'], private_chat_id=chat_id,
+                        binding_id=linked['binding_id'], status='connected').first()
+                    valid = bool(conn)
+                if valid:
+                    command = '/quote_edit' if operation == 'qe' else '/quote_approve'
+                    result = self.ingest_update({'update_id': update.get('update_id'), 'message': {
+                        'chat': chat, 'from': actor, 'text': f'{command} {token}'}},
+                        _from_quote_callback=True)
+            if isinstance(callback_id, str) and callback_id:
+                self.telegram_client.answer_callback_query(callback_id)
+            return result
         if (choice and type(chat_id) is int and chat_id == actor.get("id")
                 and chat.get("type") == "private" and not actor.get("is_bot")):
             command, confirmation_id = choice.groups()

@@ -79,6 +79,8 @@ def track_rules(service, state):
 
 
 def prepare(service, definition, payload, row):
+    if definition.name.endswith('request_approval'):
+        raise Unsupported('Chỉ được gửi duyệt bằng nút Xác nhận gửi duyệt trên đúng PDF báo giá của sale.')
     opts = payload.get('options', {})
     if set(opts) - {'rule_id'} or (definition.name.endswith('request_approval') and opts):
         raise BusinessError('Bước duyệt chỉ nhận lựa chọn bước duyệt; không nhận model/method hoặc thay đổi báo giá.')
@@ -130,6 +132,8 @@ def prepare(service, definition, payload, row):
 
 
 def execute(service, definition, payload, row, operation_id, checkpoint):
+    if definition.name.endswith('request_approval'):
+        raise Unsupported('Yêu cầu duyệt cũ đã hết hiệu lực; hãy dùng nút trên PDF mới.')
     adapter = native(service)
     if definition.name.endswith('request_approval'):
         sf = service.ctx.session_factory

@@ -187,7 +187,7 @@ class TelegramAIWorker:
 
     def _claim_update_for_ai(self, update_db_id: int, claim_token: str) -> bool:
         now = datetime.now(UTC)
-        lease_until = now + timedelta(seconds=90)
+        lease_until = now + timedelta(seconds=150)
         with self.session_factory() as db:
             stmt = text("""
                 UPDATE telegram_updates
@@ -646,7 +646,7 @@ class TelegramAIWorker:
                 )
                 return False
 
-        # Call AI Agent (Timeout 35s)
+        # Allow the Agent to finish a PDF upload or a staged approval response.
         ai_url = f"{self.settings.AI_AGENT_BASE_URL.rstrip('/')}/internal/v1/telegram/turn"
         request_id = f"tg-{update_id}"
         req_payload = {
@@ -672,7 +672,7 @@ class TelegramAIWorker:
                 "Content-Type": "application/json",
             }
             resp = httpx.post(ai_url, json=req_payload, headers=headers,
-                              timeout=75.0)
+                              timeout=130.0)
             t_ai = time.time() - t_ai_start
             _logger.info("TIMING_AI: request_id=%s duration=%.3fs status=%s", request_id, t_ai, resp.status_code)
 

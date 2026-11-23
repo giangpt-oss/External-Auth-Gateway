@@ -87,8 +87,7 @@ add('sales', 'sale.order', 'export', 'Xuất tài liệu báo giá Odoo', 'expor
 for op, title in (('message', 'Gửi tin trên báo giá'), ('note', 'Ghi chú nội bộ trên báo giá'),
                   ('activity', 'Lên lịch hoạt động trên báo giá'), ('meeting', 'Lên lịch cuộc họp trên báo giá')):
     add('sales', 'sale.order', op, title, 'quotation_chatter')
-for op, title in (('request_approval', 'Yêu cầu cấp trên duyệt báo giá'),
-                  ('grant_approval', 'Duyệt nội bộ báo giá'), ('reject_approval', 'Từ chối duyệt báo giá')):
+for op, title in (('grant_approval', 'Duyệt nội bộ báo giá'), ('reject_approval', 'Từ chối duyệt báo giá')):
     add('sales', 'sale.order', op, title, 'quotation_approval', states=('draft', 'sent'))
 add('stock', 'stock.picking', 'validate', 'Hoàn tất phiếu kho', 'validate', states=('confirmed', 'waiting', 'assigned'), group='stock.group_stock_user')
 add('stock', 'stock.picking', 'return', 'Tạo phiếu trả hàng', 'return', states=('done',), group='stock.group_stock_user')

@@ -289,6 +289,7 @@ try:
     import app.quotations.execution
     import app.quotations.jobs
     import app.quotations.tracking
+    import app.quotations.interaction
     import app.quotations.approval
 except ImportError:
     pass
