@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "cases": {
+    "read": {
+      "method": "POST",
+      "path": "/internal/v1/users/1/workspace/query",
+      "request": {"service": "drive", "method": "files.list"},
+      "http_status": 200,
+      "response": {"status": "OK", "data": {"files": [{"id": "fixture-file", "name": "Policy.txt"}]}}
+    },
+    "queued": {
+      "method": "POST",
+      "path": "/internal/v1/users/1/workspace/jobs",
+      "request": {"request_id": "fixture-request", "service": "drive", "operation": "files.list", "wait_seconds": 0},
+      "http_status": 202,
+      "response": {"status": "queued", "job_id": "fixture-job", "retry_after_seconds": 2}
+    },
+    "confirmation": {
+      "method": "GET",
+      "path": "/internal/v1/users/1/workspace/jobs/fixture-job",
+      "http_status": 200,
+      "response": {"status": "waiting_confirmation", "job_id": "fixture-job", "result": {"arguments": {"_ticket": "fixture-ticket"}}}
+    },
+    "permission": {
+      "method": "POST",
+      "path": "/internal/v1/users/1/workspace/query",
+      "request": {"service": "drive", "method": "files.list"},
+      "http_status": 200,
+      "response": {"status": "PERMISSION_DENIED", "message": "Fixture permission error"}
+    },
+    "account_changed": {
+      "method": "GET",
+      "path": "/internal/v1/users/1/workspace/jobs/fixture-job",
+      "http_status": 200,
+      "response": {"status": "failed", "job_id": "fixture-job", "error_code": "ACCOUNT_CHANGED"}
+    },
+    "unknown_result": {
+      "method": "GET",
+      "path": "/internal/v1/users/1/workspace/jobs/fixture-job",
+      "http_status": 200,
+      "response": {"status": "unknown_result", "job_id": "fixture-job", "error_code": "UNKNOWN_RESULT"}
+    }
+  }
+}

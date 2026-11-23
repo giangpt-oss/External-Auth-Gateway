@@ -18,6 +18,7 @@ def create_postgres_engine(db_url: str) -> Engine:
     normalized_url = normalize_db_url(db_url)
     return create_engine(
         normalized_url,
+        hide_parameters=True,
         pool_pre_ping=True,
         pool_size=20,
         max_overflow=10,
@@ -36,6 +37,7 @@ def create_sqlite_engine(db_url: str) -> Engine:
 
     engine = create_engine(
         db_url,
+        hide_parameters=True,
         connect_args={"check_same_thread": False},
         pool_pre_ping=True,
     )
@@ -146,6 +148,11 @@ def init_db(db_url: str) -> tuple[Engine, sessionmaker]:
 
     if engine.dialect.name == "sqlite":
         with engine.begin() as conn:
+            google_columns = {column["name"] for column in inspect(conn).get_columns("google_connections")}
+            if "connection_version" not in google_columns:
+                conn.execute(text("ALTER TABLE google_connections ADD COLUMN connection_version INTEGER NOT NULL DEFAULT 1"))
+            if "link_version" not in google_columns:
+                conn.execute(text("ALTER TABLE google_connections ADD COLUMN link_version INTEGER NOT NULL DEFAULT 1"))
             columns = {column["name"] for column in inspect(conn).get_columns("workspace_jobs")}
             for name in ("callback_retry_at", "callback_delivered_at"):
                 if name not in columns:

@@ -32,6 +32,7 @@ class ProtocolRouter:
         params: Dict[str, Any],
         body: Dict[str, Any],
         media: Any = None,
+        user_id: Optional[int | tuple[int, int]] = None,
     ) -> ProtocolChoice:
         """Select protocol based on service capability, media, mapping, and circuit breaker."""
         if not self.mcp_enabled:
@@ -40,8 +41,17 @@ class ProtocolRouter:
         if media is not None:
             return ProtocolChoice.REST
 
-        if not self.circuit_breaker.is_available(service):
-            return ProtocolChoice.REST
+        # Check circuit breaker per (user_id, service) if user_id is provided, else per service
+        if self.circuit_breaker is not None:
+            if hasattr(self.circuit_breaker, "_key") and user_id is not None:
+                if not self.circuit_breaker.is_available(user_id, service):
+                    return ProtocolChoice.REST
+            elif hasattr(self.circuit_breaker, "is_available"):
+                try:
+                    if not self.circuit_breaker.is_available(service):
+                        return ProtocolChoice.REST
+                except TypeError:
+                    pass
 
         # Check if operation is supported by MCP via google_mcp.translate
         mcp_target = translate(service, method, params or {}, body or {}, media)

@@ -12,13 +12,20 @@ config = context.config
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 from app.config import get_settings
 from app.db import normalize_db_url
 from app.models import Base
 
 target_metadata = Base.metadata
+
+
+def database_url():
+    configured = config.get_main_option("sqlalchemy.url")
+    if not configured or configured.startswith("driver://"):
+        configured = get_settings().DATABASE_URL
+    return normalize_db_url(configured)
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -27,8 +34,7 @@ target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    settings = get_settings()
-    url = normalize_db_url(settings.DATABASE_URL)
+    url = database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -42,8 +48,7 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     from app.db import create_app_engine
-    settings = get_settings()
-    connectable = create_app_engine(settings.DATABASE_URL)
+    connectable = create_app_engine(database_url())
 
     with connectable.connect() as connection:
         context.configure(

@@ -1,10 +1,9 @@
-import pytest
 from app.workspace.telemetry import ExecutionTelemetry, TelemetryStore
 
 
 def test_telemetry_recording_and_summary():
     store = TelemetryStore()
-    
+
     for i in range(10):
         t = ExecutionTelemetry(
             request_id=f"req_{i}",
@@ -28,3 +27,13 @@ def test_telemetry_recording_and_summary():
     assert summary["stages"]["external_call_ms"]["p50"] > 150.0
     assert summary["stages"]["total_duration_ms"]["p95"] > 600.0
 
+
+def test_drive_permission_time_contributes_to_total_duration():
+    telemetry = ExecutionTelemetry(
+        request_id="drive-request",
+        internal_retrieval_ms=10.0,
+        drive_permission_check_ms=20.0,
+        drive_content_decrypt_ms=30.0,
+    )
+
+    assert telemetry.finish().total_duration_ms == 60.0

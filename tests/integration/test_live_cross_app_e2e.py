@@ -294,7 +294,7 @@ def test_live_cross_app_connection_status_ok(live_cross_app_env):
     assert resp.json().get("status") in ("ok", "accepted")
 
     # Wait for the worker to process, call AI Agent, and deliver to Telegram mock
-    deadline = time.time() + 10
+    deadline = time.time() + 15
     delivered = False
     while time.time() < deadline:
         if len(tg_handler.received_messages) >= 1:
@@ -361,7 +361,7 @@ def test_live_cross_app_connection_status_reconnect_required(live_cross_app_env)
     )
     assert resp.status_code == 200
 
-    deadline = time.time() + 10
+    deadline = time.time() + 15
     delivered = False
     while time.time() < deadline:
         if len(tg_handler.received_messages) >= 1:

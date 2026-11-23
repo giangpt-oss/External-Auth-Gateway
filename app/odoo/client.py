@@ -1,46 +1,66 @@
+import enum
 import ssl
+import threading
 import xmlrpc.client
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import httpx
 from app.workspace.network_slots import outbound_slot, outbound_user_id
 
 
+class OdooErrorCode(str, enum.Enum):
+    AUTH_FAILED = "AUTH_FAILED"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    INACTIVE_USER = "INACTIVE_USER"
+    EXTERNAL_USER = "EXTERNAL_USER"
+    INVALID_PARAMS = "INVALID_PARAMS"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    CONFLICT = "CONFLICT"
+    UNKNOWN_RESULT = "UNKNOWN_RESULT"
+
+
 class OdooError(Exception):
     """Base exception for Odoo errors."""
+    def __init__(self, message: str, error_code: OdooErrorCode = OdooErrorCode.UNKNOWN_RESULT, raw_error: Optional[Any] = None):
+        super().__init__(message)
+        self.message = message
+        self.error_code = error_code
+        self.raw_error = raw_error
 
+
+class OdooApiError(OdooError):
     pass
 
 
 class OdooAuthError(OdooError):
     """Raised when authentication fails."""
-
-    pass
+    def __init__(self, message: str, raw_error: Optional[Any] = None):
+        super().__init__(message, error_code=OdooErrorCode.AUTH_FAILED, raw_error=raw_error)
 
 
 class OdooAccessError(OdooError):
     """Raised when access is denied / permission error."""
-
-    pass
+    def __init__(self, message: str, error_code: OdooErrorCode = OdooErrorCode.ACCESS_DENIED, raw_error: Optional[Any] = None):
+        super().__init__(message, error_code=error_code, raw_error=raw_error)
 
 
 class OdooNetworkError(OdooError):
     """Raised on connection timeout or network failure."""
-
-    pass
+    def __init__(self, message: str, raw_error: Optional[Any] = None):
+        super().__init__(message, error_code=OdooErrorCode.NETWORK_ERROR, raw_error=raw_error)
 
 
 class OdooAccountInactiveError(OdooAccessError):
     """Raised when Odoo account is inactive (active=False)."""
-
-    pass
+    def __init__(self, message: str, raw_error: Optional[Any] = None):
+        super().__init__(message, error_code=OdooErrorCode.INACTIVE_USER, raw_error=raw_error)
 
 
 class OdooExternalUserError(OdooAccessError):
     """Raised when Odoo account is an external/portal user (share=True)."""
-
-    pass
+    def __init__(self, message: str, raw_error: Optional[Any] = None):
+        super().__init__(message, error_code=OdooErrorCode.EXTERNAL_USER, raw_error=raw_error)
 
 
 class TimeoutTransport(xmlrpc.client.SafeTransport):
@@ -57,7 +77,7 @@ class TimeoutTransport(xmlrpc.client.SafeTransport):
 
 
 class OdooClient:
-    def __init__(self, url: str, db: str, timeout: int = 20):
+    def __init__(self, url: str, db: str, timeout: int = 20, max_xmlrpc_threads: int = 8):
         parsed = urlparse(url)
         if parsed.scheme and parsed.netloc:
             self.url = f"{parsed.scheme}://{parsed.netloc}"
@@ -65,19 +85,40 @@ class OdooClient:
             self.url = url.rstrip("/")
         self.db = db
         self.timeout = timeout
+        self.xmlrpc_semaphore = threading.BoundedSemaphore(max_xmlrpc_threads)
+        self._http_pool = httpx.Client(
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=30, keepalive_expiry=30.0),
+            timeout=httpx.Timeout(timeout=float(timeout), connect=3.0, pool=2.0),
+        )
+
+    def close(self):
+        """Close connection pool on shutdown."""
+        if hasattr(self, "_http_pool") and not self._http_pool.is_closed:
+            self._http_pool.close()
 
     def studio_approval_spec(self, uid, secret, record_id, method, company_id):
         """Studio returns integer map keys, unsupported by XML-RPC serialization."""
         if method not in ('action_confirm', 'action_quotation_send'):
             raise OdooError('Unsupported quotation approval method.')
         try:
-            response = httpx.post(self.url + '/jsonrpc', json={
-                'jsonrpc': '2.0', 'method': 'call', 'id': 1,
-                'params': {'service': 'object', 'method': 'execute_kw', 'args': [
-                    self.db, uid, secret, 'studio.approval.rule', 'get_approval_spec',
-                    [[{'model': 'sale.order', 'method': method, 'action_id': False, 'res_id': record_id}]],
-                    {'context': {'allowed_company_ids': [company_id], 'force_company': company_id}}]}},
-                timeout=self.timeout)
+            response = self._http_pool.post(
+                self.url + '/jsonrpc',
+                json={
+                    'jsonrpc': '2.0',
+                    'method': 'call',
+                    'id': 1,
+                    'params': {
+                        'service': 'object',
+                        'method': 'execute_kw',
+                        'args': [
+                            self.db, uid, secret, 'studio.approval.rule', 'get_approval_spec',
+                            [[{'model': 'sale.order', 'method': method, 'action_id': False, 'res_id': record_id}]],
+                            {'context': {'allowed_company_ids': [company_id], 'force_company': company_id}}
+                        ]
+                    }
+                },
+                timeout=self.timeout
+            )
             response.raise_for_status()
             body = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -119,7 +160,7 @@ class OdooClient:
     def authenticate_password(self, login: str, password: str) -> int:
         """Use Odoo's interactive login, which validates the account password."""
         try:
-            response = httpx.post(
+            response = self._http_pool.post(
                 f"{self.url}/web/session/authenticate",
                 json={
                     "jsonrpc": "2.0",
@@ -156,8 +197,9 @@ class OdooClient:
             read_methods = {"read", "search", "search_read", "search_count", "fields_get",
                             "read_group", "name_search", "name_get", "check_access_rights",
                             "check_access_rule", "default_get", "has_group"}
-            with outbound_slot(outbound_user_id.get(), write=method not in read_methods):
-                return models.execute_kw(self.db, uid, secret, model, method, args, kwargs)
+            with self.xmlrpc_semaphore:
+                with outbound_slot(outbound_user_id.get(), write=method not in read_methods):
+                    return models.execute_kw(self.db, uid, secret, model, method, args, kwargs)
         except (TimeoutError, ConnectionError, OSError) as e:
             raise OdooNetworkError(f"Network error during Odoo call: {e}") from e
         except xmlrpc.client.Fault as e:

@@ -129,6 +129,7 @@ def login(
                     "csrf_token": request.cookies.get("anon_csrf", ""),
                     "user": None,
                     "error": f"Quá nhiều lần thử: {e}",
+                    "login_value": login,
                 },
                 status_code=429,
             )
@@ -148,6 +149,7 @@ def login(
                     "csrf_token": request.cookies.get("anon_csrf", ""),
                     "user": None,
                     "error": "Thông tin đăng nhập không chính xác hoặc Odoo từ chối xác thực.",
+                    "login_value": login,
                 },
                 status_code=401,
             )
@@ -167,6 +169,7 @@ def login(
                     "csrf_token": request.cookies.get("anon_csrf", ""),
                     "user": None,
                     "error": "Tài khoản của bạn đã bị vô hiệu hóa hoặc là tài khoản Portal không được phép truy cập.",
+                    "login_value": login,
                 },
                 status_code=403,
             )
@@ -186,6 +189,7 @@ def login(
                     "csrf_token": request.cookies.get("anon_csrf", ""),
                     "user": None,
                     "error": "Không thể kết nối đến máy chủ Odoo. Vui lòng thử lại sau.",
+                    "login_value": login,
                 },
                 status_code=502,
             )

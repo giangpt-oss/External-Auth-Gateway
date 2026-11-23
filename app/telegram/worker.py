@@ -7,6 +7,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from cryptography.fernet import InvalidToken
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
@@ -829,14 +830,28 @@ class TelegramAIWorker:
             return False
 
         try:
+            if ai_response_str.startswith("drive1:"):
+                from app.security import decrypt_secret
+
+                ai_response_str = decrypt_secret(ai_response_str.removeprefix("drive1:"), self.settings.ENCRYPTION_KEY)
+                if delivery_chunks_str:
+                    delivery_chunks_str = decrypt_secret(
+                        delivery_chunks_str.removeprefix("drive1:"), self.settings.ENCRYPTION_KEY,
+                    )
             stored_response = json.loads(ai_response_str)
             delivery = normalize_agent_response(stored_response)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, InvalidToken):
             self._mark_failed(update_db_id, "Invalid persisted AI delivery response", claim_token=claim_token)
+            return True
+        expires_at = stored_response.get("expires_at_unix") if isinstance(stored_response, dict) else None
+        if type(expires_at) in (int, float) and datetime.now(UTC).timestamp() >= expires_at:
+            self._mark_delivery_failed(update_db_id, claim_token, "Workspace result expired")
             return True
         expected_binding_id = (
             stored_response.get("telegram_binding_id") if isinstance(stored_response, dict) else None
         )
+        drive_link = stored_response.get("drive_link") if isinstance(stored_response, dict) else None
+        drive_verification = stored_response.get("drive_verification", []) if drive_link else []
         if (delivery["attachments"] or delivery["confirmation_buttons"]) and not expected_binding_id:
             self._mark_delivery_failed(update_db_id, claim_token, "Structured delivery lacks original binding")
             return True
@@ -847,7 +862,12 @@ class TelegramAIWorker:
 
             delivery_chunks_str = json.dumps(all_chunks, ensure_ascii=False)
             delivery_index = 0
-            if not self._save_delivery_chunks(update_db_id, claim_token, delivery_chunks_str):
+            stored_chunks = delivery_chunks_str
+            if drive_link:
+                from app.security import encrypt_secret
+
+                stored_chunks = "drive1:" + encrypt_secret(stored_chunks, self.settings.ENCRYPTION_KEY)
+            if not self._save_delivery_chunks(update_db_id, claim_token, stored_chunks):
                 _logger.warning(
                     "Failed to save delivery chunks for update %s: claim lost", update_id
                 )
@@ -881,6 +901,15 @@ class TelegramAIWorker:
                     err_msg or "Recipient verification failed",
                 )
                 return True
+
+            if drive_link:
+                from app.workspace.drive_permissions import delivery_evidence_current
+
+                with self.session_factory() as db:
+                    link_is_current = delivery_evidence_current(db, bound_user_id, drive_link, drive_verification)
+                if not link_is_current:
+                    self._mark_delivery_failed(update_db_id, claim_token, "Google Drive link changed")
+                    return True
 
             chunk = all_chunks[idx]
 

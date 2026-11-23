@@ -39,8 +39,14 @@ class User(Base):
         "OdooCredential", back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
     sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
-    google_connection = relationship(
-        "GoogleConnection", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    google_connections = relationship(
+        "GoogleConnection", back_populates="user", cascade="all, delete-orphan"
+    )
+    account_selection = relationship(
+        "GoogleAccountSelection", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    workspace_activities = relationship(
+        "WorkspaceActivity", back_populates="user", cascade="all, delete-orphan"
     )
     telegram_connection = relationship(
         "TelegramConnection", back_populates="user", uselist=False, cascade="all, delete-orphan"
@@ -48,6 +54,15 @@ class User(Base):
     calendar_pairs = relationship(
         "CalendarPair", back_populates="user", cascade="all, delete-orphan"
     )
+
+    @property
+    def google_connection(self):
+        """Backward-compatibility helper: returns active GoogleConnection or first available."""
+        if hasattr(self, "account_selection") and self.account_selection and self.account_selection.active_account:
+            return self.account_selection.active_account
+        if hasattr(self, "google_connections") and self.google_connections:
+            return self.google_connections[0]
+        return None
 
     __table_args__ = (
         UniqueConstraint("tenant", "database", "odoo_uid", name="uq_users_tenant_db_uid"),
@@ -100,7 +115,7 @@ class GoogleConnection(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     google_sub = Column(String(255), unique=True, index=True, nullable=False)
     email = Column(String(255), nullable=False)
@@ -111,10 +126,64 @@ class GoogleConnection(Base):
     status = Column(
         String(32), default="connected", nullable=False
     )  # 'connected', 'reconnect_required', 'disconnected'
+    connection_version = Column(Integer, nullable=False, default=1)
+    link_version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, default=utc_now, nullable=False)
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
-    user = relationship("User", back_populates="google_connection")
+    user = relationship("User", back_populates="google_connections")
+
+    @property
+    def account_id(self) -> int:
+        return self.id
+
+
+class GoogleAccountSelection(Base):
+    __tablename__ = "google_account_selections"
+
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    active_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    selection_version = Column(Integer, nullable=False, default=1)
+    state = Column(String(32), nullable=False, default="accepting")  # 'accepting', 'draining'
+    draining_since = Column(DateTime, nullable=True)
+    target_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    user = relationship("User", back_populates="account_selection")
+    active_account = relationship("GoogleConnection", foreign_keys=[active_account_id])
+    target_account = relationship("GoogleConnection", foreign_keys=[target_account_id])
+
+
+class WorkspaceActivity(Base):
+    __tablename__ = "workspace_activities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    activity_type = Column(
+        String(64), nullable=False, index=True
+    )  # 'task_queued', 'task_running', 'preview_pending', 'write_reconciling', 'callback_pending', 'telegram_outbox', 'calendar_sync', 'drive_sync'
+    reference_id = Column(String(128), nullable=False, index=True)
+    status = Column(
+        String(32), nullable=False, default="active", index=True
+    )  # 'active', 'reconciling', 'completed', 'cancelled'
+    has_outbound_write = Column(Boolean, nullable=False, default=False)
+    lease_expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
+
+    user = relationship("User", back_populates="workspace_activities")
+    google_account = relationship("GoogleConnection", foreign_keys=[google_account_id])
 
 
 TELEGRAM_WEB_BINDING_PREFIX = "tg_bind_web_"
@@ -151,6 +220,9 @@ class CalendarPair(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     google_subject = Column(String(255), nullable=False)
     google_calendar_id = Column(String(255), default="primary", nullable=False)
     odoo_event_id = Column(Integer, nullable=False)
@@ -168,9 +240,10 @@ class CalendarPair(Base):
     updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
     user = relationship("User", back_populates="calendar_pairs")
+    google_account = relationship("GoogleConnection", foreign_keys=[google_account_id])
 
     __table_args__ = (
-        UniqueConstraint("user_id", "odoo_event_id", name="uq_calpair_user_odoo_event"),
+        UniqueConstraint("user_id", "google_account_id", "odoo_event_id", name="uq_calpair_user_account_odoo_event"),
         UniqueConstraint(
             "google_subject",
             "google_calendar_id",
@@ -185,6 +258,9 @@ class SyncIntent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     source = Column(String(16), nullable=False)  # 'odoo', 'google'
     target = Column(String(16), nullable=False)  # 'odoo', 'google'
     source_event_id = Column(String(255), nullable=False)
@@ -205,6 +281,9 @@ class TelegramUpdate(Base):
     payload = Column(Text, nullable=False)
     user_id = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="SET NULL"), nullable=True, index=True
     )
     claim_token = Column(String(64), nullable=True, index=True)
     status = Column(
@@ -258,6 +337,9 @@ class ActionOperation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     operation_id = Column(String(64), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    google_account_id = Column(
+        Integer, ForeignKey("google_connections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     action = Column(String(64), nullable=False)
     payload_hash = Column(String(64), nullable=False)
     telegram_binding_id = Column(String(64), nullable=True)

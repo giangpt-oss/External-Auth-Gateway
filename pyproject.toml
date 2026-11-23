@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "python-docx>=1.1,<2",
     "openpyxl>=3.1.5,<4",
+    "pypdf>=6.19,<8",
     "jsonschema>=4.23,<5",
     "fastapi==0.115.6",
     "uvicorn[standard]==0.34.0",
@@ -14,7 +15,7 @@ dependencies = [
     "sqlalchemy==2.0.36",
     "psycopg[binary]>=3.2,<4",
     "alembic>=1.14,<2",
-    "httpx==0.28.1",
+    "httpx[http2]==0.28.1",
     "cryptography==44.0.0",
     "google-auth==2.37.0",
     "qrcode[pil]==8.0",

@@ -7,6 +7,7 @@ from app.config import Settings
 from app.db import init_db
 from app.main import create_app
 from app.models import CalendarPair, OdooCredential, SyncIntent, User
+from app.odoo.client import OdooAuthError
 from app.security import encrypt_secret
 
 
@@ -72,12 +73,37 @@ def test_portal_login_page_renders_form(portal_client):
     client, _ = portal_client
     res = client.get("/login")
     assert res.status_code == 200
-    assert "Cổng Xác Thực & Đồng Bộ" in res.text
+    assert "External Auth Gateway" in res.text
+    assert "Đăng nhập bằng Odoo" in res.text
+    assert 'data-stitch-theme="light"' in res.text
+    assert 'data-stitch-theme="dark"' in res.text
     assert 'name="csrf_token"' in res.text
     assert "Tài khoản Odoo" in res.text
     assert "Mật khẩu Odoo" in res.text
     assert 'name="credential_kind"' not in res.text
     assert "API Key" not in res.text
+
+
+def test_portal_rejected_password_stays_in_login_card(portal_client):
+    client, _ = portal_client
+    mock_odoo = MagicMock()
+    mock_odoo.authenticate_password.side_effect = OdooAuthError("invalid password")
+    client.app.state.odoo_client = mock_odoo
+    client.get("/login")
+    response = client.post(
+        "/auth/login?theme=dark",
+        data={"login": "portal_user@company.com", "secret": "incorrect",
+              "csrf_token": client.cookies["anon_csrf"]},
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 401
+    assert 'id="odooLoginForm"' in response.text
+    assert 'data-stitch-theme="dark"' in response.text
+    assert 'action="/auth/login?theme=dark"' in response.text
+    assert 'role="alert"' in response.text
+    assert 'value="portal_user@company.com"' in response.text
+    assert "incorrect" not in response.text
 
 
 def test_portal_dashboard_requires_login(portal_client):
@@ -127,74 +153,13 @@ def test_portal_dashboard_renders_authenticated_user(portal_client):
     assert login_res.status_code == 200
     assert "Nguyễn Văn A" in login_res.text
     assert "Google Workspace" in login_res.text
+    assert "Kết nối tài khoản Google" in login_res.text
     assert "Telegram" in login_res.text
-    assert "Đồng bộ Lịch" in login_res.text
-    # Should see conflict and ambiguous section
-    assert "Xung đột lịch cần xử lý" in login_res.text
-    assert "Lịch chờ đối soát" in login_res.text
     with session_factory() as db:
         user = db.query(User).filter_by(odoo_uid=77).one()
         assert db.query(OdooCredential).filter_by(user_id=user.id).one().credential_kind == "password"
 
 
-def test_calendar_sync_csrf_validation(portal_client):
-    client, session_factory = portal_client
-    mock_odoo = MagicMock()
-    mock_odoo.authenticate_password.return_value = 77
-    mock_odoo.execute.return_value = [
-        {
-            "id": 77,
-            "name": "Nguyễn Văn A",
-            "login": "portal_user@company.com",
-            "active": True,
-            "share": False,
-            "tz": "Asia/Bangkok",
-            "partner_id": [77, "Nguyễn Văn A"],
-        }
-    ]
-    client.app.state.odoo_client = mock_odoo
-
-    # 1. Login
-    login_page = client.get("/login")
-    import re
-
-    csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', login_page.text)
-    client.post(
-        "/auth/login",
-        data={
-            "login": "portal_user@company.com",
-            "secret": "valid_secret",
-            "csrf_token": csrf_match.group(1),
-        },
-        headers={"Accept": "text/html"},
-    )
-
-    # 2. Get dashboard and extract dashboard CSRF
-    dash = client.get("/")
-    assert dash.status_code == 200
-    dash_csrf = re.search(r'name="csrf_token"\s+value="([^"]+)"', dash.text).group(1)
-    # Ensure it's a real 32-char URL safe token, NOT a python object repr!
-    assert "Session object" not in dash_csrf
-    assert len(dash_csrf) >= 16
-
-    # 3. Post to /calendar/sync with valid CSRF
-    sync_res = client.post(
-        "/calendar/sync",
-        data={"csrf_token": dash_csrf},
-        follow_redirects=False,
-    )
-    # Must redirect (303) back to dashboard, NOT return 403 Invalid CSRF token
-    assert sync_res.status_code == 303
-    assert "sync_success" in sync_res.headers["location"] or "error" in sync_res.headers["location"]
-
-    # 4. Post to /calendar/sync with INVALID CSRF -> 403
-    bad_res = client.post(
-        "/calendar/sync",
-        data={"csrf_token": "wrong_csrf_token"},
-        follow_redirects=False,
-    )
-    assert bad_res.status_code == 403
-    assert "Invalid CSRF token" in bad_res.json()["detail"]
 
 
 def test_portal_telegram_disconnect_html_redirect(portal_client, temp_db_path):

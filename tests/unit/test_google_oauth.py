@@ -167,15 +167,16 @@ def test_callback_reconnect_different_sub_rejected(google_components):
         )
         db.add(existing)
         db.commit()
+        account_id = existing.id
 
-    _, state = service.begin(user_id=user_id, session_id=None)
+    _, state = service.begin(user_id=user_id, mode="reconnect", target_account_id=account_id)
     mock_id_info = {
         "sub": "different_sub_222",  # Different account!
         "email": "user2@company.com",
         "hd": "company.com",
     }
     with session_factory() as db:
-        lt = db.query(LinkToken).filter_by(purpose="google_oauth").first()
+        lt = db.query(LinkToken).filter_by(purpose=f"google_oauth:reconnect:{account_id}").first()
         mock_id_info["nonce"] = lt.oauth_nonce
 
     with (

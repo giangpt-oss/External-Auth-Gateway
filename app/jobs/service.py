@@ -5,10 +5,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import sessionmaker
 
 from app.calendar.reminders import ReminderService
-from app.calendar.service import CalendarSyncService
 from app.google.oauth import GoogleOAuthService
 from app.models import GoogleConnection, LinkToken, Outbox, Session, TelegramUpdate, User
-from app.workspace.network_slots import NetworkSlots, network_slots, outbound_user_id
+from app.workspace.network_slots import NetworkSlots, network_slots
 
 _logger = logging.getLogger(__name__)
 
@@ -18,12 +17,10 @@ class JobService:
         self,
         session_factory: sessionmaker,
         google_oauth: GoogleOAuthService,
-        calendar_sync: CalendarSyncService,
         reminder_service: ReminderService,
     ):
         self.session_factory = session_factory
         self.google_oauth = google_oauth
-        self.calendar_sync = calendar_sync
         self.reminder_service = reminder_service
         with session_factory() as db:
             self.network_slots = NetworkSlots(db.get_bind())
@@ -41,45 +38,33 @@ class JobService:
     def refresh_tokens_job(self) -> None:
         now = datetime.now(UTC)
         with self.session_factory() as db:
-            # Active Google connections expiring within 5 minutes
+            recent_activity = now - timedelta(minutes=30)
             expiring = (
                 db.query(GoogleConnection)
+                .join(User, User.id == GoogleConnection.user_id)
                 .filter(
+                    User.active.is_(True),
                     GoogleConnection.status == "connected",
                     GoogleConnection.expires_at <= now + timedelta(minutes=5),
+                    (User.updated_at >= recent_activity) | (GoogleConnection.updated_at >= recent_activity)
+                    | db.query(TelegramUpdate.id).filter(
+                        TelegramUpdate.user_id == User.id, TelegramUpdate.created_at >= recent_activity,
+                    ).exists(),
                 )
                 .all()
             )
-            user_ids = [c.user_id for c in expiring]
+            account_ids = [(c.user_id, c.id) for c in expiring]
 
-        for uid in user_ids:
+        for uid, account_id in account_ids:
             with self._semaphore, self._get_user_lock(uid):
                 try:
                     token = network_slots.set(self.network_slots)
                     try:
-                        self.google_oauth.get_valid_access_token(uid)
+                        self.google_oauth.get_valid_access_token(uid, google_account_id=account_id)
                     finally:
                         network_slots.reset(token)
                 except Exception as e:
                     _logger.warning(f"Error auto-refreshing Google token for user {uid}: {e}")
-
-    def calendar_sync_job(self) -> None:
-        with self.session_factory() as db:
-            users = db.query(User).filter_by(active=True).all()
-            user_ids = [u.id for u in users]
-
-        for uid in user_ids:
-            with self._semaphore, self._get_user_lock(uid):
-                try:
-                    token = network_slots.set(self.network_slots)
-                    owner_token = outbound_user_id.set(uid)
-                    try:
-                        self.calendar_sync.sync_user(uid)
-                    finally:
-                        outbound_user_id.reset(owner_token)
-                        network_slots.reset(token)
-                except Exception as e:
-                    _logger.error(f"Error in background calendar sync for user {uid}: {e}")
 
     def reminders_and_outbox_job(self) -> None:
         now = datetime.now(UTC)
