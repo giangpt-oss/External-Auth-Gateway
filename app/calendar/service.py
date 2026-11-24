@@ -489,7 +489,7 @@ class CalendarSyncService:
         if not auth_data:
             raise RuntimeError("User credentials not available.")
 
-        _, odoo_uid, partner_id, user_tz, odoo_secret, _ = auth_data
+        _, odoo_uid, partner_id, user_tz, odoo_secret, *_ = auth_data
 
         with self.session_factory() as db:
             pair = db.query(CalendarPair).filter_by(id=pair_id, user_id=user_id).first()

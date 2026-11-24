@@ -17,6 +17,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.business import models as business_models  # noqa: F401
     from app.quotations import execution as quotation_execution  # noqa: F401
     from app.quotations import jobs as quotation_jobs  # noqa: F401
+    from app.quotations import pdf_review as quotation_pdf_review  # noqa: F401
     from app.reporting import models as reporting_models  # noqa: F401
 
     engine, session_factory = init_db(settings.DATABASE_URL)

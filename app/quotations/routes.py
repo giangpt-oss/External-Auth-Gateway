@@ -22,6 +22,29 @@ class PrepareRequest(TelegramScope):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class PdfTokenRequest(TelegramScope):
+    token: str = Field(..., min_length=24, max_length=24)
+
+
+class PdfRetryRequest(TelegramScope):
+    order_id: int | None = None
+    name: str | None = None
+    company_id: int | None = None
+
+
+class PdfEditRequest(TelegramScope):
+    token: str = Field(..., min_length=24, max_length=24)
+    line_id: int | None = None
+    quantity: float | None = None
+    payment_term_id: int | None = None
+    optional_fields: dict[str, Any] | None = None
+
+
+class ApprovalDecisionRequest(TelegramScope):
+    token: str = Field(..., min_length=24, max_length=24)
+    feedback: str | None = None
+
+
 def enabled(request):
     if not request.app.state.settings.ENABLE_QUOTATIONS:
         raise HTTPException(409, "Chức năng báo giá chưa được bật trên Gateway.")
@@ -120,3 +143,157 @@ def get_prepare_job(user_id: int, job_id: str, request: Request, binding: Telegr
     enabled(request)
     with authenticated_context(request, user_id, binding) as ctx:
         return load_result(request, ctx, user_id, binding, job_id)
+
+
+@router.get("/optional-metadata")
+def optional_metadata(
+    user_id: int,
+    request: Request,
+    field: str = Query(..., min_length=1, max_length=100),
+    company_id: int | None = None,
+    binding: TelegramScope = Depends(query_scope),
+):
+    enabled(request)
+    with authenticated_context(request, user_id, binding) as ctx:
+        try:
+            return QuotationService(ctx.service.client, ctx.user.odoo_uid, ctx.secret).optional_metadata(field, company_id)
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/optional-candidates")
+def optional_candidates(
+    user_id: int,
+    request: Request,
+    field: str = Query(..., min_length=1, max_length=100),
+    query: str = "",
+    company_id: int | None = None,
+    binding: TelegramScope = Depends(query_scope),
+):
+    enabled(request)
+    with authenticated_context(request, user_id, binding) as ctx:
+        try:
+            return QuotationService(ctx.service.client, ctx.user.odoo_uid, ctx.secret).optional_candidates(
+                field, query, company_id
+            )
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/pdf-retry")
+def pdf_retry(user_id: int, body: PdfRetryRequest, request: Request):
+    from app.quotations.pdf_review import retry_sale_pdf
+
+    enabled(request)
+    with authenticated_context(request, user_id, body) as ctx:
+        try:
+            return retry_sale_pdf(
+                request, ctx, user_id, body,
+                order_id=body.order_id, name=body.name, company_id=body.company_id,
+            )
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/pdf-open")
+def pdf_open(user_id: int, body: PdfTokenRequest, request: Request):
+    from app.quotations.pdf_review import open_sale_pdf
+
+    enabled(request)
+    with authenticated_context(request, user_id, body) as ctx:
+        try:
+            return open_sale_pdf(request, ctx, user_id, body, body.token)
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/pdf-edit")
+def pdf_edit(user_id: int, body: PdfEditRequest, request: Request):
+    from app.quotations.pdf_review import edit_sale_pdf
+
+    enabled(request)
+    with authenticated_context(request, user_id, body) as ctx:
+        try:
+            return edit_sale_pdf(
+                request,
+                ctx,
+                user_id,
+                body,
+                token=body.token,
+                line_id=body.line_id,
+                quantity=body.quantity,
+                payment_term_id=body.payment_term_id,
+                optional_fields=body.optional_fields,
+            )
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/approval-submit")
+def approval_submit(user_id: int, body: PdfTokenRequest, request: Request):
+    from app.quotations.pdf_review import submit_pdf_approval
+
+    enabled(request)
+    with authenticated_context(request, user_id, body) as ctx:
+        try:
+            return submit_pdf_approval(request, ctx, user_id, body, body.token)
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/approval-open")
+def approval_open(user_id: int, body: PdfTokenRequest, request: Request):
+    from app.quotations.pdf_review import open_approval_pdf
+
+    enabled(request)
+    with authenticated_context(request, user_id, body) as ctx:
+        try:
+            return open_approval_pdf(request, ctx, user_id, body, body.token)
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/approval-decision")
+def approval_decision(user_id: int, body: ApprovalDecisionRequest, request: Request):
+    from app.quotations.pdf_review import decide_approval_pdf
+
+    enabled(request)
+    with authenticated_context(request, user_id, body) as ctx:
+        try:
+            return decide_approval_pdf(
+                request, ctx, user_id, body, token=body.token, feedback=body.feedback
+            )
+        except OdooAccessError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except OdooNetworkError as exc:
+            raise HTTPException(503, "Không thể kết nối Odoo.") from exc
+        except QuotationValidationError as exc:
+            raise HTTPException(400, str(exc)) from exc

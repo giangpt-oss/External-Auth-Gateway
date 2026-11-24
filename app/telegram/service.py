@@ -228,12 +228,14 @@ class TelegramService:
         data = callback.get("data")
         choice = re.fullmatch(rf"(confirm|cancel):({CONFIRMATION_ID})", data) if isinstance(data, str) else None
         opt_choice = data[4:].strip() if isinstance(data, str) and data.startswith("opt:") and len(data) > 4 else None
+        quote_btn = re.fullmatch(r"(qedit|qappr|qgrant|qfeed):([0-9a-f]{24})", data) if isinstance(data, str) else None
         message = callback.get("message") or {}
         actor = callback.get("from") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
         result = {"status": "ignored", "reason": "Invalid confirmation callback"}
+        should_clear_keyboard = True
         is_private_human = (
             type(chat_id) is int
             and chat_id == actor.get("id")
@@ -249,9 +251,27 @@ class TelegramService:
             result = self.ingest_update({"update_id": update.get("update_id"), "message": {
                 "chat": chat, "from": actor, "text": opt_choice,
             }})
+        elif quote_btn and is_private_human:
+            kind, qtoken = quote_btn.groups()
+            cmd_map = {
+                "qedit": "/quote_edit",
+                "qappr": "/quote_approve",
+                "qgrant": "/quote_grant",
+                "qfeed": "/quote_feedback",
+            }
+            should_clear_keyboard = kind in ("qappr", "qgrant")
+            result = self.ingest_update({"update_id": update.get("update_id"), "message": {
+                "chat": chat, "from": actor, "text": f"{cmd_map[kind]} {qtoken}",
+            }})
         if isinstance(callback_id, str) and callback_id:
             self.telegram_client.answer_callback_query(callback_id)
-        if result["status"] == "ok" and not result.get("duplicate") and self.enable_ai_forwarding and type(message_id) is int:
+        if (
+            should_clear_keyboard
+            and result["status"] == "ok"
+            and not result.get("duplicate")
+            and self.enable_ai_forwarding
+            and type(message_id) is int
+        ):
             self.telegram_client.clear_inline_keyboard(chat_id, message_id)
         return result
 
