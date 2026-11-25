@@ -119,16 +119,34 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
     tool_plan = payload.service == "workspace" and payload.operation == "plan.read"
     if tool_plan and (
         effective_action != "read" or payload.is_write or not key
-        or not payload.body.get("steps") or not 1 <= len(payload.body.get("steps", [])) <= 8
+        or not payload.telegram_binding_id or payload.telegram_chat_id is None
+        or payload.telegram_user_id is None
+        or not isinstance(payload.body.get("steps"), list)
+        or not 1 <= len(payload.body.get("steps", [])) <= 8
         or len(json.dumps(payload.body).encode()) > 65536
     ):
-        raise HTTPException(422, "Kế hoạch nền tối đa 8 bước.")
+        raise HTTPException(422, "Kế hoạch nền cần liên kết Telegram và tối đa 8 bước đọc.")
 
     with request.app.state.session_factory() as db:
         user = db.query(User).filter_by(id=user_id, active=True).first()
         if not user:
             raise HTTPException(404, detail="User not found or inactive")
         binding = None
+        if payload.telegram_user_id is not None or payload.telegram_chat_id is not None:
+            connection = user.telegram_connection
+            if (
+                not connection
+                or connection.status != "connected"
+                or not connection.binding_id
+                or connection.telegram_user_id != payload.telegram_user_id
+                or connection.private_chat_id != payload.telegram_chat_id
+                or (
+                    payload.telegram_binding_id is not None
+                    and connection.binding_id != payload.telegram_binding_id
+                )
+            ):
+                raise HTTPException(403, "RECONNECT_REQUIRED: Liên kết Telegram đã thay đổi.")
+            binding = connection.binding_id
 
         payload_data = {
             "action": effective_action,
@@ -140,6 +158,15 @@ async def create_workspace_job(user_id: int, payload: WorkspaceJobCreateRequest,
             "is_write": payload.is_write,
             "_ticket": ticket_val,
             "operation_id": payload.operation_id,
+            **(
+                {
+                    "telegram_binding_id": binding,
+                    "telegram_user_id": payload.telegram_user_id,
+                    "telegram_chat_id": payload.telegram_chat_id,
+                }
+                if binding
+                else {}
+            ),
         }
         current_hash = compute_payload_hash(payload_data)
 

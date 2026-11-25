@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models import ActionOperation, Base, TelegramConnection, User
 from app.quotations import execution
-from app.quotations.interaction import QuoteApprovalDelivery, QuotePdfMessage
+from app.quotations.pdf_review import QuotationPdfToken
 from app.quotations.pdf import render_quotation_pdf
 
 
@@ -139,8 +139,8 @@ def test_creation_only_sends_draft_pdf_to_sale_before_pdf_confirmation(monkeypat
     native_request.assert_not_called()
     send.assert_called_once()
     assert send.call_args.args[0] == 7
-    buttons = send.call_args.kwargs['reply_markup']['inline_keyboard'][0]
+    buttons = send.call_args.kwargs['inline_keyboard'][0]
     assert [button['text'] for button in buttons] == ['Chỉnh sửa', 'Xác nhận gửi duyệt']
     with sf() as db:
-        assert db.query(QuotePdfMessage).count() == 1
-        assert db.query(QuoteApprovalDelivery).count() == 0
+        assert db.query(QuotationPdfToken).filter_by(role='sale', message_id=44).count() == 1
+        assert db.query(QuotationPdfToken).filter_by(role='approver').count() == 0

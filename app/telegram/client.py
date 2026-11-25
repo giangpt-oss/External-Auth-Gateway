@@ -68,8 +68,12 @@ def normalize_agent_response(payload: Any) -> dict[str, Any]:
                 cleaned_opts = [plain_text(str(o)).strip()[:60] for o in opts if str(o).strip()][:4]
                 if cleaned_opts:
                     option_buttons[idx_key] = cleaned_opts
-    return {"messages": [plain_text(message) for message in messages], "attachments": normalized,
-            "confirmation_buttons": buttons, "option_buttons": option_buttons}
+    return {
+        "messages": [plain_text(message) for message in messages],
+        "attachments": normalized,
+        "confirmation_buttons": buttons,
+        **({"option_buttons": option_buttons} if option_buttons else {}),
+    }
 
 
 def agent_delivery_chunks(delivery, split_text):
@@ -201,6 +205,7 @@ class TelegramClient:
         caption: str = "",
         content_type: str = "application/octet-stream",
         reply_markup: dict[str, Any] | None = None,
+        inline_keyboard: list[list[dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         """Upload trusted artifact bytes; never ask Telegram to fetch a URL or path."""
         if not self.bot_token:
@@ -209,13 +214,15 @@ class TelegramClient:
             raise TelegramError("Document must contain between 1 byte and 49 MiB")
         safe_name = filename.replace("\\", "/").split("/")[-1]
         safe_name = "".join(ch for ch in safe_name if ch.isprintable())[:200] or "report.xlsx"
+        form_data = {"chat_id": str(chat_id), "caption": plain_text(caption)[:1024]}
+        if reply_markup is not None:
+            form_data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+        elif inline_keyboard:
+            form_data["reply_markup"] = json.dumps({"inline_keyboard": inline_keyboard}, ensure_ascii=False)
         try:
-            form = {"chat_id": str(chat_id), "caption": plain_text(caption)[:1024]}
-            if reply_markup is not None:
-                form["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
             response = httpx.post(
                 self._get_url("sendDocument"),
-                data=form,
+                data=form_data,
                 files={"document": (safe_name, content, content_type)},
                 timeout=30.0,
             )

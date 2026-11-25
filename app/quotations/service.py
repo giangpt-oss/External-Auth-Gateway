@@ -236,7 +236,7 @@ class QuotationService:
                     raise QuotationValidationError(f"{spec['label']} cần danh sách ID hợp lệ, không trùng.")
                 for record_id in value:
                     self._optional_record(spec['relation'], record_id, company_id)
-                result[field] = [(6, 0, value)]
+                result[field] = [[6, 0, value]]
         if 'incoterm_location' in result and not (supplied.get('incoterm') or (existing or {}).get('incoterm')):
             raise QuotationValidationError('Địa điểm Incoterm cần chọn Incoterm trước.')
         return result
@@ -336,6 +336,112 @@ class QuotationService:
             rows = sorted(visible, key=score, reverse=True)
         return {'kind': 'payment_terms', 'company_id': company_id, 'items': rows[:20],
                 'exact_match_unique': len(exact) == 1, 'unique_query_match': False}
+
+    def optional_metadata(self, field: str, company_id: int | None = None) -> dict:
+        company_id, _ = self._companies(company_id)
+        if field not in OPTIONAL_FIELDS or approval_control(field):
+            return {"available": False, "message": "Trường tùy chọn không thuộc danh mục hỗ trợ."}
+        spec = self._schema("sale.order").get(field)
+        if not spec or spec.get("readonly"):
+            return {"available": False, "message": f"Trường {field} hiện không khả dụng hoặc chỉ đọc trên Odoo."}
+        kind = spec.get("type")
+        if kind == "boolean":
+            return {"available": True, "type": "boolean", "options": []}
+        if kind == "selection":
+            options = [{"value": val, "label": lbl} for val, lbl in (spec.get("selection") or [])]
+            return {"available": bool(options), "type": "selection", "options": options}
+        if kind == "datetime":
+            return {"available": True, "type": "datetime", "options": []}
+        if kind in ("many2one", "many2many"):
+            relation = spec.get("relation")
+            if not relation or not self._rpc(relation, "check_access_rights", ["read", False]):
+                return {"available": False, "message": f"Tài khoản chưa có quyền tra cứu {field} trên Odoo."}
+            return {"available": True, "type": kind, "relation": relation, "options": []}
+        if kind in ("char", "text"):
+            return {"available": True, "type": "char", "options": []}
+        return {"available": False, "message": f"Kiểu dữ liệu {kind} của {field} chưa được hỗ trợ."}
+
+    def _optional_candidates_simple(self, field: str, query: str = "", company_id: int | None = None, limit: int = 10) -> dict:
+        company_id, _ = self._companies(company_id)
+        meta = self.optional_metadata(field, company_id)
+        if not meta.get("available") or meta.get("type") not in ("many2one", "many2many"):
+            raise QuotationValidationError(meta.get("message") or "Trường này không hỗ trợ tra cứu danh mục.")
+        relation = meta["relation"]
+        rel_schema = self._schema(relation)
+        fields = [f for f in ("id", "display_name", "name", "company_id") if f in rel_schema or f == "id"]
+        domain: list[Any] = []
+        if "company_id" in rel_schema:
+            domain += ["|", ("company_id", "=", False), ("company_id", "=", company_id)]
+        if "active" in rel_schema:
+            domain.append(("active", "=", True))
+        if relation == "res.users" and "share" in rel_schema:
+            domain.append(("share", "=", False))
+        term = (query or "").strip()[:150]
+        if term:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            searchable = [f for f in ("display_name", "name") if f in rel_schema]
+            if searchable:
+                exact_dom = domain + ["|"] * (len(searchable) - 1) + [(f, "=ilike", escaped) for f in searchable]
+                exact = self._rpc(relation, "search_read", [exact_dom], company_id, fields=fields, order="id asc", limit=2)
+                if len(exact) == 1:
+                    return {"field": field, "company_id": company_id, "items": exact, "exact_match_unique": True}
+            domain.append(("display_name" if "display_name" in rel_schema else "name", "ilike", term))
+        rows = self._rpc(relation, "search_read", [domain], company_id, fields=fields, order="id asc", limit=max(1, min(int(limit), 20)))
+        return {"field": field, "company_id": company_id, "items": rows, "exact_match_unique": False}
+
+    def _optional_values(self, data: Any, company_id: int) -> dict:
+        if not isinstance(data, dict):
+            raise QuotationValidationError("optional_fields phải là một object.")
+        from datetime import datetime
+
+        order_schema = self._schema("sale.order")
+        clean: dict[str, Any] = {}
+        for name, value in data.items():
+            if name not in OPTIONAL_FIELDS or approval_control(name):
+                raise QuotationValidationError(f"Trường tùy chọn {name} không được phép ghi.")
+            spec = order_schema.get(name)
+            if not spec or spec.get("readonly"):
+                raise QuotationValidationError(f"Trường {name} hiện không khả dụng trên Odoo.")
+            kind = spec.get("type")
+            if kind == "boolean":
+                if not isinstance(value, bool):
+                    raise QuotationValidationError(f"{name} phải là boolean.")
+                clean[name] = value
+            elif kind == "selection":
+                allowed_vals = [s[0] for s in (spec.get("selection") or [])]
+                if value not in allowed_vals:
+                    raise QuotationValidationError(f"Giá trị lựa chọn của {name} không hợp lệ.")
+                clean[name] = value
+            elif kind == "datetime":
+                if not isinstance(value, str):
+                    raise QuotationValidationError(f"{name} phải là chuỗi ngày giờ.")
+                try:
+                    datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                except ValueError as exc:
+                    raise QuotationValidationError(f"{name} phải có định dạng YYYY-MM-DD HH:MM:SS.") from exc
+                clean[name] = value
+            elif kind == "many2one":
+                relation = spec.get("relation")
+                if not relation:
+                    raise QuotationValidationError(f"Quan hệ {name} không hợp lệ.")
+                rec_id = _id(value, name)
+                self._record(relation, rec_id, company_id)
+                clean[name] = rec_id
+            elif kind == "many2many":
+                relation = spec.get("relation")
+                if not relation or not isinstance(value, list) or not value or len(value) > 50:
+                    raise QuotationValidationError(f"{name} phải là danh sách ID hợp lệ.")
+                ids = [_id(item, name) for item in value]
+                for rec_id in ids:
+                    self._record(relation, rec_id, company_id)
+                clean[name] = [[6, 0, list(dict.fromkeys(ids))]]
+            elif kind in ("char", "text"):
+                if not isinstance(value, str) or not value.strip() or len(value.strip()) > 255:
+                    raise QuotationValidationError(f"{name} phải là văn bản không rỗng (tối đa 255 ký tự).")
+                clean[name] = value.strip()
+            else:
+                raise QuotationValidationError(f"Kiểu dữ liệu của {name} chưa được hỗ trợ.")
+        return clean
 
     def _custom(self, model: str, data: Any, company_id: int) -> dict:
         if not isinstance(data, dict):

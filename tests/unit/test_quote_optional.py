@@ -62,7 +62,7 @@ def test_relation_id_must_be_visible_in_selected_company(monkeypatch):
         return [] if args[0][-1] == ('id', '=', 99) else [{'id': 8, 'display_name': 'Được phép'}]
     service._rpc = rpc
     assert service.optional_values({'team_id': 8, 'tag_ids': [8]}, 3) == {
-        'team_id': 8, 'tag_ids': [(6, 0, [8])]}
+        'team_id': 8, 'tag_ids': [[6, 0, [8]]]}
     assert ('company_id', '=', 3) in calls[0][1]
     with pytest.raises(OdooAccessError):
         service.optional_values({'team_id': 99}, 3)

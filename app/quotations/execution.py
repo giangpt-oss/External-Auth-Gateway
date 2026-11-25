@@ -140,9 +140,35 @@ class QuoteExecutionWorker(QuotePreparationWorker):
                         raise ValueError('Tài khoản Odoo đã thay đổi.')
                 send_started = True
                 if document:
-                    from app.quotations.interaction import send_pdf_with_buttons
+                    from app.quotations.pdf_review import issue_sale_pdf_token, mark_pdf_token_delivered, sale_pdf_keyboard
+
                     filename, content = document
-                    send_pdf_with_buttons(client, self.sf, ctx.user, scope, result, filename, content, message)
+                    keyboard = None
+                    if result and result.get('state') == 'draft' and result.get('id') and result.get('company_id'):
+                        can_req = bool(
+                            getattr(self.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False)
+                            and (result.get('approval') or {}).get('status') not in ('pending', 'approved')
+                        )
+                        pdf_token = issue_sale_pdf_token(
+                            self.sf,
+                            user_id=user_id,
+                            tenant=tenant,
+                            database=database,
+                            scope=scope,
+                            order=result,
+                            company_id=result['company_id'][0],
+                        )
+                        keyboard = sale_pdf_keyboard(pdf_token, can_request_approval=can_req)
+                    sent = client.send_document(
+                        scope.chat_id,
+                        filename,
+                        content,
+                        caption=message,
+                        content_type='application/pdf',
+                        inline_keyboard=keyboard,
+                    )
+                    if keyboard:
+                        mark_pdf_token_delivered(self.sf, pdf_token, sent)
                 else:
                     client.send_message(scope.chat_id, message)
             delivery = 'delivered'

@@ -230,62 +230,26 @@ class TelegramService:
         callback_id = callback.get("id")
         data = callback.get("data")
         choice = re.fullmatch(rf"(confirm|cancel):({CONFIRMATION_ID})", data) if isinstance(data, str) else None
-        quote_choice = re.fullmatch(r"(qe|qs):([0-9a-f]{24})", data) if isinstance(data, str) else None
-        old_approval_choice = re.fullmatch(r"qa:([0-9a-f]{24})", data) if isinstance(data, str) else None
-        approval_choice = re.fullmatch(r"(qg|qr):([0-9a-f]{24})", data) if isinstance(data, str) else None
+        legacy_quote_btn = re.fullmatch(r"(?:qe|qs|qa|qg|qr):[0-9a-f]{24}", data) if isinstance(data, str) else None
         opt_choice = data[4:].strip() if isinstance(data, str) and data.startswith("opt:") and len(data) > 4 else None
+        quote_btn = re.fullmatch(r"(qedit|qappr|qgrant|qfeed):([0-9a-f]{24})", data) if isinstance(data, str) else None
         message = callback.get("message") or {}
         actor = callback.get("from") or {}
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
         message_id = message.get("message_id")
         result = {"status": "ignored", "reason": "Invalid confirmation callback"}
+        should_clear_keyboard = True
         is_private_human = (
             type(chat_id) is int
             and chat_id == actor.get("id")
             and chat.get("type") == "private"
             and not actor.get("is_bot")
         )
-        if old_approval_choice:
+        if legacy_quote_btn:
             if isinstance(callback_id, str) and callback_id:
-                self.telegram_client.answer_callback_query(
-                    callback_id, 'Nút cũ đã hết hiệu lực. Hãy gửi lại PDF để xác nhận gửi duyệt.')
-            return {"status": "ignored", "reason": "Superseded quotation approval button"}
-        if approval_choice and is_private_human and type(message_id) is int:
-            from app.quotations.interaction import QuoteApprovalDelivery
-            operation, token = approval_choice.groups()
-            with self.session_factory() as db:
-                row = db.get(QuoteApprovalDelivery, token)
-                conn = db.query(TelegramConnection).filter_by(user_id=row.approver_user_id,
-                    telegram_user_id=actor['id'], private_chat_id=chat_id,
-                    binding_id=row.binding_id, status='connected').first() if row else None
-                valid = bool(row and row.message_id == message_id and row.status == 'pending' and conn)
-            if valid:
-                command = '/quote_grant' if operation == 'qg' else '/quote_feedback'
-                result = self.ingest_update({'update_id': update.get('update_id'), 'message': {
-                    'chat': chat, 'from': actor, 'text': f'{command} {token}'}},
-                    _from_quote_callback=True)
-            if isinstance(callback_id, str) and callback_id:
-                self.telegram_client.answer_callback_query(callback_id)
-            return result
-        if quote_choice and is_private_human and type(message_id) is int:
-            from app.quotations.interaction import find_pdf_message
-            operation, token = quote_choice.groups()
-            linked = find_pdf_message(self.session_factory, token, actor['id'], chat_id, message_id)
-            if linked:
-                with self.session_factory() as db:
-                    conn = db.query(TelegramConnection).filter_by(user_id=linked['user_id'],
-                        telegram_user_id=actor['id'], private_chat_id=chat_id,
-                        binding_id=linked['binding_id'], status='connected').first()
-                    valid = bool(conn)
-                if valid:
-                    command = '/quote_edit' if operation == 'qe' else '/quote_approve'
-                    result = self.ingest_update({'update_id': update.get('update_id'), 'message': {
-                        'chat': chat, 'from': actor, 'text': f'{command} {token}'}},
-                        _from_quote_callback=True)
-            if isinstance(callback_id, str) and callback_id:
-                self.telegram_client.answer_callback_query(callback_id)
-            return result
+                self.telegram_client.answer_callback_query(callback_id, "Nút PDF cũ đã hết hiệu lực. Hãy gửi lại PDF mới.")
+            return {"status": "ignored", "reason": "Superseded quotation PDF button"}
         if choice and is_private_human:
             command, confirmation_id = choice.groups()
             result = self.ingest_update({"update_id": update.get("update_id"), "message": {
@@ -295,9 +259,48 @@ class TelegramService:
             result = self.ingest_update({"update_id": update.get("update_id"), "message": {
                 "chat": chat, "from": actor, "text": opt_choice,
             }})
+        elif quote_btn and is_private_human:
+            from app.quotations.pdf_review import QuotationPdfToken
+
+            kind, qtoken = quote_btn.groups()
+            expected_role = "approver" if kind in ("qgrant", "qfeed") else "sale"
+            with self.session_factory() as db:
+                row = db.get(QuotationPdfToken, qtoken)
+                connection = db.query(TelegramConnection).filter_by(
+                    user_id=row.user_id,
+                    telegram_user_id=actor["id"],
+                    private_chat_id=chat_id,
+                    binding_id=row.telegram_binding_id,
+                    status="connected",
+                ).first() if row else None
+                valid = bool(
+                    row and row.role == expected_role and row.active == 1
+                    and row.chat_id == chat_id and row.message_id == message_id
+                    and type(message_id) is int and connection
+                )
+            if not valid:
+                if isinstance(callback_id, str) and callback_id:
+                    self.telegram_client.answer_callback_query(callback_id, "Nút PDF không còn hợp lệ.")
+                return {"status": "ignored", "reason": "Invalid quotation PDF button"}
+            cmd_map = {
+                "qedit": "/quote_edit",
+                "qappr": "/quote_approve",
+                "qgrant": "/quote_grant",
+                "qfeed": "/quote_feedback",
+            }
+            should_clear_keyboard = kind in ("qappr", "qgrant")
+            result = self.ingest_update({"update_id": update.get("update_id"), "message": {
+                "chat": chat, "from": actor, "text": f"{cmd_map[kind]} {qtoken}",
+            }}, _from_quote_callback=True)
         if isinstance(callback_id, str) and callback_id:
             self.telegram_client.answer_callback_query(callback_id)
-        if result["status"] == "ok" and not result.get("duplicate") and self.enable_ai_forwarding and type(message_id) is int:
+        if (
+            should_clear_keyboard
+            and result["status"] == "ok"
+            and not result.get("duplicate")
+            and self.enable_ai_forwarding
+            and type(message_id) is int
+        ):
             self.telegram_client.clear_inline_keyboard(chat_id, message_id)
         return result
 
