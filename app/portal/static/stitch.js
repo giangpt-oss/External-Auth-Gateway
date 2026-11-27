@@ -27,16 +27,25 @@ function submitAction(action, values = {}) {
   form.submit();
 }
 
-for (const button of document.querySelectorAll("button[data-stitch-theme]")) {
-  button.addEventListener("click", () => {
-    const theme = button.dataset.stitchTheme;
-    try { localStorage.setItem("gateway_theme", theme); } catch {}
-    const url = new URL(location.href);
-    if (url.pathname === "/auth/login") url.pathname = "/login";
-    url.searchParams.set("theme", theme);
-    location.assign(url);
-  });
+const themeSwitch = document.querySelector("[data-stitch-theme-switch]");
+
+function applyTheme(theme) {
+  document.documentElement.dataset.stitchTheme = theme;
+  document.documentElement.style.colorScheme = theme;
+  themeSwitch.setAttribute("aria-checked", String(theme === "dark"));
+  const loginForm = document.getElementById("odooLoginForm");
+  if (loginForm) loginForm.action = "/auth/login?theme=" + theme;
+  renderWorkspaceApps(theme === "dark");
 }
+applyTheme(document.documentElement.dataset.stitchTheme);
+themeSwitch.addEventListener("click", () => {
+  const theme = themeSwitch.getAttribute("aria-checked") === "true" ? "light" : "dark";
+  applyTheme(theme);
+  try { localStorage.setItem("gateway_theme", theme); } catch {}
+  const url = new URL(location.href);
+  url.searchParams.set("theme", theme);
+  history.replaceState(null, "", url);
+});
 
 const password = document.getElementById("odoo_password");
 document.getElementById("togglePasswordBtn")?.addEventListener("click", event => {
@@ -70,60 +79,59 @@ for (const button of document.querySelectorAll('[data-stitch-action="activate"]'
     button.title = "Tài khoản Google cần được kết nối lại";
   }
 }
-const isDarkTheme = document.documentElement.classList.contains("dark") ||
-  document.documentElement.dataset.stitchTheme === "dark" ||
-  new URLSearchParams(location.search).get("theme") === "dark";
-for (const app of document.querySelectorAll("[data-stitch-app]")) {
-  const name = app.dataset.stitchApp;
-  const enabled = Boolean(context.workspaceApps[name]);
-  app.dataset.enabled = String(enabled);
-  app.setAttribute("aria-label", name + (enabled ? " · Đã cấp quyền" : " · Chưa cấp quyền"));
+function renderWorkspaceApps(isDarkTheme) {
+  for (const app of document.querySelectorAll("[data-stitch-app]")) {
+    const name = app.dataset.stitchApp;
+    const enabled = Boolean(context.workspaceApps[name]);
+    app.dataset.enabled = String(enabled);
+    app.setAttribute("aria-label", name + (enabled ? " · Đã cấp quyền" : " · Chưa cấp quyền"));
 
-  const label = app.querySelector("span.truncate");
-  const dot = app.lastElementChild;
-  const iconBox = app.firstElementChild?.firstElementChild;
-  const icon = iconBox?.querySelector(".material-symbols-outlined");
+    const label = app.querySelector("span.truncate");
+    const dot = app.lastElementChild;
+    const iconBox = app.firstElementChild?.firstElementChild;
+    const icon = iconBox?.querySelector(".material-symbols-outlined");
 
-  if (enabled) {
-    app.classList.remove("border-dashed", "opacity-75", "opacity-70", "opacity-60", "bg-slate-50", "bg-slate-50/60");
-    app.style.borderStyle = "solid";
-    app.style.opacity = "1";
-    app.style.backgroundColor = isDarkTheme ? "#051424" : "#ffffff";
-    app.style.borderColor = isDarkTheme ? "#1c2d42" : "#e2e8f0";
-    if (label) {
-      label.classList.remove("text-slate-500", "text-slate-400", "text-slate-600");
-      label.style.color = isDarkTheme ? "#e2e8f0" : "#1e293b";
-    }
-    if (dot) {
-      dot.classList.remove("bg-slate-300", "bg-slate-600");
-      dot.style.backgroundColor = isDarkTheme ? "#2dd4bf" : "#10b981";
-      dot.style.boxShadow = isDarkTheme ? "0 0 8px #2dd4bf" : "0 1px 2px rgba(0, 0, 0, 0.05)";
-      dot.title = "Đã kết nối";
-    }
-    if (name === "calendar" && iconBox && icon) {
-      iconBox.classList.remove("bg-slate-100", "bg-[#0d1c2d]");
-      iconBox.style.backgroundColor = isDarkTheme ? "rgba(59, 130, 246, 0.16)" : "#eff6ff";
-      icon.classList.remove("text-slate-400", "text-slate-500");
-      icon.style.color = isDarkTheme ? "#60a5fa" : "#2563eb";
-    }
-  } else {
-    app.classList.add("border-dashed");
-    app.style.borderStyle = "dashed";
-    app.style.opacity = isDarkTheme ? "0.6" : "0.75";
-    app.style.backgroundColor = isDarkTheme ? "#051424" : "#f8fafc";
-    app.style.borderColor = isDarkTheme ? "#1c2d42" : "#cbd5e1";
-    if (label) {
-      label.style.color = isDarkTheme ? "#94a3b8" : "#64748b";
-    }
-    if (dot) {
-      dot.classList.remove("bg-teal-500", "bg-emerald-500", "shadow-sm", "bg-[#2dd4bf]", "shadow-[0_0_8px_#2dd4bf]");
-      dot.style.backgroundColor = isDarkTheme ? "#475569" : "#cbd5e1";
-      dot.style.boxShadow = "none";
-      dot.title = "Chưa kết nối";
-    }
-    if (name === "calendar" && iconBox && icon) {
-      iconBox.style.backgroundColor = isDarkTheme ? "#0d1c2d" : "#f1f5f9";
-      icon.style.color = "#94a3b8";
+    if (enabled) {
+      app.classList.remove("border-dashed", "opacity-75", "opacity-70", "opacity-60", "bg-slate-50", "bg-slate-50/60");
+      app.style.borderStyle = "solid";
+      app.style.opacity = "1";
+      app.style.backgroundColor = isDarkTheme ? "#051424" : "#ffffff";
+      app.style.borderColor = isDarkTheme ? "#1c2d42" : "#e2e8f0";
+      if (label) {
+        label.classList.remove("text-slate-500", "text-slate-400", "text-slate-600");
+        label.style.color = isDarkTheme ? "#e2e8f0" : "#1e293b";
+      }
+      if (dot) {
+        dot.classList.remove("bg-slate-300", "bg-slate-600");
+        dot.style.backgroundColor = isDarkTheme ? "#2dd4bf" : "#10b981";
+        dot.style.boxShadow = isDarkTheme ? "0 0 8px #2dd4bf" : "0 1px 2px rgba(0, 0, 0, 0.05)";
+        dot.title = "Đã kết nối";
+      }
+      if (name === "calendar" && iconBox && icon) {
+        iconBox.classList.remove("bg-slate-100", "bg-[#0d1c2d]");
+        iconBox.style.backgroundColor = isDarkTheme ? "rgba(59, 130, 246, 0.16)" : "#eff6ff";
+        icon.classList.remove("text-slate-400", "text-slate-500");
+        icon.style.color = isDarkTheme ? "#60a5fa" : "#2563eb";
+      }
+    } else {
+      app.classList.add("border-dashed");
+      app.style.borderStyle = "dashed";
+      app.style.opacity = "0.75";
+      app.style.backgroundColor = isDarkTheme ? "#051424" : "#f8fafc";
+      app.style.borderColor = isDarkTheme ? "#1c2d42" : "#cbd5e1";
+      if (label) {
+        label.style.color = isDarkTheme ? "#94a3b8" : "#64748b";
+      }
+      if (dot) {
+        dot.classList.remove("bg-teal-500", "bg-emerald-500", "shadow-sm", "bg-[#2dd4bf]", "shadow-[0_0_8px_#2dd4bf]");
+        dot.style.backgroundColor = isDarkTheme ? "#475569" : "#cbd5e1";
+        dot.style.boxShadow = "none";
+        dot.title = "Chưa kết nối";
+      }
+      if (name === "calendar" && iconBox && icon) {
+        iconBox.style.backgroundColor = isDarkTheme ? "#0d1c2d" : "#f1f5f9";
+        icon.style.color = "#94a3b8";
+      }
     }
   }
 }
@@ -135,35 +143,71 @@ let telegramTimer;
 let telegramDeadline = 0;
 let telegramVerifyButton = null;
 let telegramVerifyLink = null;
-async function pollTelegram() {
-  if (Date.now() >= telegramDeadline) {
-    if (telegramVerifyLink && telegramVerifyButton) {
-      telegramVerifyLink.replaceWith(telegramVerifyButton);
-      telegramVerifyLink = null;
+let telegramNeedsRefresh = false;
+
+function restoreTelegramVerifyButton() {
+  if (telegramVerifyLink && telegramVerifyButton) {
+    telegramVerifyLink.replaceWith(telegramVerifyButton);
+    telegramVerifyLink = null;
+  }
+}
+
+async function checkTelegramStatus() {
+  const response = await fetch("/connections/telegram/verification-status", { cache: "no-store" });
+  if (response.status === 401) {
+    return "unauthorized";
+  }
+  if (response.ok) {
+    const status = await response.json();
+    if (status.linked && status.revision !== context.telegramRevision) {
+      location.reload();
+      return "linked";
     }
-    feedback("Mã QR đã hết hạn. Hãy tạo mã xác minh mới.", true);
+  }
+  return "pending";
+}
+
+async function refreshExpiredTelegramQr() {
+  clearTimeout(telegramTimer);
+  telegramNeedsRefresh = false;
+  if (document.hidden) {
+    telegramNeedsRefresh = true;
     return;
   }
   try {
-    const response = await fetch("/connections/telegram/verification-status", { cache: "no-store" });
-    if (response.status === 401) {
+    const state = await checkTelegramStatus();
+    if (state === "unauthorized") {
+      restoreTelegramVerifyButton();
       feedback("Phiên Odoo đã hết hạn. Vui lòng đăng nhập lại.", true);
       return;
     }
-    if (response.ok) {
-      const status = await response.json();
-      if (status.linked && status.revision !== context.telegramRevision) {
-        location.reload();
-        return;
-      }
+    if (state === "linked") return;
+  } catch {
+    // Attempt issuing a fresh QR; verifyTelegram restores the manual button if still offline.
+  }
+  await verifyTelegram(telegramVerifyButton, { silent: false, autoRefresh: true });
+}
+
+async function pollTelegram() {
+  if (Date.now() >= telegramDeadline) {
+    await refreshExpiredTelegramQr();
+    return;
+  }
+  try {
+    const state = await checkTelegramStatus();
+    if (state === "unauthorized") {
+      restoreTelegramVerifyButton();
+      feedback("Phiên Odoo đã hết hạn. Vui lòng đăng nhập lại.", true);
+      return;
     }
+    if (state === "linked") return;
   } catch {
     // Retry transient failures while the issued verification link is valid.
   }
   telegramTimer = setTimeout(pollTelegram, 2000);
 }
 
-async function verifyTelegram(button, { silent = false } = {}) {
+async function verifyTelegram(button, { silent = false, autoRefresh = false } = {}) {
   if (telegramBusy) return;
   if (!context.telegramConfigured) {
     if (!silent) feedback("Gateway cần được cấu hình xác minh Telegram để tạo mã QR.", true);
@@ -171,10 +215,13 @@ async function verifyTelegram(button, { silent = false } = {}) {
   }
   telegramBusy = true;
   clearTimeout(telegramTimer);
-  const originalLabel = button ? button.textContent : "";
+  telegramNeedsRefresh = false;
   if (button) {
     telegramVerifyButton = button;
-    button.setAttribute("aria-busy", "true");
+    if (button.isConnected) button.setAttribute("aria-busy", "true");
+  }
+  if (telegramVerifyLink?.isConnected) {
+    telegramVerifyLink.setAttribute("aria-busy", "true");
   }
   try {
     const response = await fetch("/connections/telegram/verify", {
@@ -188,7 +235,16 @@ async function verifyTelegram(button, { silent = false } = {}) {
       redirect: "error",
       cache: "no-store",
     });
-    if (!response.ok) throw new Error("Không tạo được mã QR. Vui lòng thử lại.");
+    if (response.status === 401 || response.status === 403) {
+      throw new Error("Phiên Odoo đã hết hạn. Vui lòng đăng nhập lại.");
+    }
+    if (!response.ok) {
+      throw new Error(
+        autoRefresh
+          ? "Mã QR đã hết hạn và không tự làm mới được. Hãy bấm để tạo lại."
+          : "Không tạo được mã QR. Vui lòng thử lại."
+      );
+    }
     const data = await response.json();
     const url = new URL(data.link_url);
     const expiresAt = Date.parse(data.expires_at);
@@ -207,27 +263,47 @@ async function verifyTelegram(button, { silent = false } = {}) {
       image.setAttribute("data-stitch-qr", "");
       placeholder.replaceWith(image);
     }
-    if (button) {
+    const activeTarget = telegramVerifyLink?.isConnected
+      ? telegramVerifyLink
+      : (button?.isConnected ? button : null);
+    if (activeTarget) {
       const link = document.createElement("a");
-      link.className = button.className;
+      link.className = (button || activeTarget).className;
+      const palette = (button || activeTarget).dataset.stitchPalette;
+      if (palette) link.dataset.stitchPalette = palette;
       link.href = url.href;
       link.target = "_blank";
       link.rel = "noopener";
       link.textContent = "Mở Telegram để xác minh";
-      button.replaceWith(link);
+      activeTarget.replaceWith(link);
       telegramVerifyLink = link;
     }
-    telegramDeadline = expiresAt;
+    const refreshMarginMs = Math.min(10000, Math.max(0, (expiresAt - Date.now()) / 5));
+    telegramDeadline = Math.max(Date.now() + 2000, expiresAt - refreshMarginMs);
     telegramTimer = setTimeout(pollTelegram, 2000);
-    if (!silent) feedback("Quét mã QR hoặc mở Telegram để xác minh tài khoản.");
+    if (!silent) {
+      feedback(
+        autoRefresh
+          ? "Mã QR đã được tự động làm mới. Quét mã QR hoặc mở Telegram để xác minh."
+          : "Quét mã QR hoặc mở Telegram để xác minh tài khoản."
+      );
+    }
   } catch (error) {
-    if (button) button.textContent = originalLabel;
+    if (autoRefresh) restoreTelegramVerifyButton();
     if (!silent) feedback(error.message, true);
   } finally {
     telegramBusy = false;
     if (button) button.removeAttribute("aria-busy");
+    if (telegramVerifyLink) telegramVerifyLink.removeAttribute("aria-busy");
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !telegramBusy &&
+      (telegramNeedsRefresh || (telegramDeadline > 0 && Date.now() >= telegramDeadline))) {
+    refreshExpiredTelegramQr();
+  }
+});
 
 // Automatically load the real Telegram verification QR code on dashboard open
 const initialQr = document.querySelector("[data-stitch-qr]");

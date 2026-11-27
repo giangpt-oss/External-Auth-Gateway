@@ -5,7 +5,6 @@ import secrets
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Optional
 
 import httpx
 from google.auth.transport import requests as google_requests
@@ -351,7 +350,7 @@ class GoogleOAuthService:
             db.commit()
 
     def _perform_network_refresh(
-        self, user_id: int, google_account_id: Optional[int] = None
+        self, user_id: int, google_account_id: int | None = None
     ) -> tuple[str, int, str | None]:
         """Thực hiện HTTP POST refresh token với Google endpoint."""
         with self.session_factory() as db:
@@ -406,7 +405,7 @@ class GoogleOAuthService:
         self,
         user_id: int,
         force_refresh: bool = False,
-        google_account_id: Optional[int] = None,
+        google_account_id: int | None = None,
     ) -> str:
         # Check distributed lease in database to coordinate across multiple worker processes
         now = datetime.now(UTC)
@@ -453,7 +452,7 @@ class GoogleOAuthService:
                 )
             )
 
-    def disconnect(self, user_id: int, google_account_id: Optional[int] = None) -> None:
+    def disconnect(self, user_id: int, google_account_id: int | None = None) -> None:
         with self.session_factory() as db:
             from app.google.account_resolver import GoogleAccountResolver
             from app.workspace.activity_tracker import WorkspaceActivityTracker

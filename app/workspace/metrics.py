@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import collections
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -11,7 +12,7 @@ from app.workspace.mcp_client import CircuitBreaker
 from app.workspace.models import WorkspaceJob
 
 
-def _percentile(data: List[float], percentile: float) -> float:
+def _percentile(data: list[float], percentile: float) -> float:
     if not data:
         return 0.0
     sorted_data = sorted(data)
@@ -56,15 +57,15 @@ class WorkspaceMetricsCollector:
     def get_metrics(
         self,
         db: Session,
-        circuit_breaker: Optional[CircuitBreaker] = None,
-    ) -> Dict[str, Any]:
+        circuit_breaker: CircuitBreaker | None = None,
+    ) -> dict[str, Any]:
         """Aggregate in-memory request stats and database job counts."""
         latencies = list(self._latencies)
         p50 = _percentile(latencies, 0.50)
         p95 = _percentile(latencies, 0.95)
 
         # Database job counts by status
-        job_counts: Dict[str, int] = collections.defaultdict(int)
+        job_counts: dict[str, int] = collections.defaultdict(int)
         try:
             results = (
                 db.query(WorkspaceJob.status, func.count(WorkspaceJob.id))
@@ -77,7 +78,7 @@ class WorkspaceMetricsCollector:
             pass
 
         # Circuit breaker status per service
-        cb_status: Dict[str, bool] = {}
+        cb_status: dict[str, bool] = {}
         if circuit_breaker:
             for s in ("gmail", "calendar", "drive", "docs", "sheets", "slides"):
                 cb_status[s] = circuit_breaker.is_available(s)

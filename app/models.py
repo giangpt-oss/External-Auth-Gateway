@@ -362,23 +362,27 @@ try:
 except ImportError:
     pass
 
+
+
 try:
     import app.reporting.models
 except ImportError:
     pass
 
 try:
+    import app.quotations.approval
     import app.quotations.execution
     import app.quotations.jobs
-    import app.quotations.tracking
-    import app.quotations.interaction
-    import app.quotations.approval
+    import app.quotations.tracking  # noqa: F401
+    import app.quotations.interaction  # noqa: F401
+    import app.quotations.approval  # noqa: F401
 except ImportError:
     pass
 
-from app.workspace.models import (
+# Register Workspace tables and preserve the public model imports used by callers.
+from app.workspace.models import (  # noqa: E402, F401
+    OAuthRefreshLease,
+    WorkspaceIdempotencyRecord,
     WorkspaceJob,
     WorkspaceJobStatus,
-    WorkspaceIdempotencyRecord,
-    OAuthRefreshLease,
 )

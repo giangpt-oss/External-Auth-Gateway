@@ -102,16 +102,26 @@ def _get_workspace_service(request: Request):
 
 
 def _get_odoo_service(request: Request, user: User) -> OdooService | None:
+    import threading
+
     settings = request.app.state.settings
     odoo_url = user.tenant or settings.ODOO_URL
     odoo_db = user.database or settings.ODOO_DB
     if not odoo_url or not odoo_db:
         return None
     state = request.app.state
-    with state.outbound_clients_lock:
+    lock = getattr(state, "outbound_clients_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        state.outbound_clients_lock = lock
+    clients = getattr(state, "odoo_clients", None)
+    if clients is None:
+        clients = {}
+        state.odoo_clients = clients
+    with lock:
         key = (odoo_url, odoo_db)
-        client = state.odoo_clients.get(key)
+        client = clients.get(key)
         if client is None:
             client = OdooClient(url=odoo_url, db=odoo_db)
-            state.odoo_clients[key] = client
+            clients[key] = client
     return OdooService(client)

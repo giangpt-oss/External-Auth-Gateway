@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any
 
 from app.workspace.google_mcp import translate
 from app.workspace.mcp_client import CircuitBreaker
@@ -19,7 +19,7 @@ class ProtocolRouter:
 
     def __init__(
         self,
-        circuit_breaker: Optional[CircuitBreaker] = None,
+        circuit_breaker: CircuitBreaker | None = None,
         mcp_enabled: bool = True,
     ):
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
@@ -29,10 +29,10 @@ class ProtocolRouter:
         self,
         service: str,
         method: str,
-        params: Dict[str, Any],
-        body: Dict[str, Any],
+        params: dict[str, Any],
+        body: dict[str, Any],
         media: Any = None,
-        user_id: Optional[int | tuple[int, int]] = None,
+        user_id: int | tuple[int, int] | None = None,
     ) -> ProtocolChoice:
         """Select protocol based on service capability, media, mapping, and circuit breaker."""
         if not self.mcp_enabled:

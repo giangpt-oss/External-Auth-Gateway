@@ -1,6 +1,7 @@
 """Verified preparations and durable execution through the existing action API."""
 import hashlib
 import json
+import logging
 import re
 import secrets
 import time
@@ -16,7 +17,12 @@ from app.business.models import (
     BusinessPreparation,
     BusinessTargetLock,
 )
-from app.business.schemas import LookupRequest, PrepareRequest
+from app.business.schemas import (
+    LookupRequest,
+    PrepareRequest,
+    PurchaseApprovalDecision,
+    PurchaseApprovalRequest,
+)
 from app.business.service import BusinessError, BusinessService, Conflict, Unsupported, enabled
 from app.internal.security import verify_agent_secret
 from app.models import ActionOperation
@@ -26,6 +32,7 @@ from app.reporting.context import authenticated_context
 from app.reporting.schemas import TelegramScope
 
 router = APIRouter(prefix='/internal/v1/users/{user_id}/business', dependencies=[Depends(verify_agent_secret)])
+logger = logging.getLogger(__name__)
 
 
 def dumps(value):
@@ -189,6 +196,24 @@ def execute_business_action(user_id, req, request):
                         parent_operation_id=req.operation_id, data_json=dumps(continuation), expires_at=time.time() + 300))
                     db.commit()
                 result['continuation_token'] = token
+            if req.action == 'business.purchases.create' and result.get('status') == 'completed':
+                rec = result.get('record') or {}
+                if rec.get('state') in ('draft', 'sent'):
+                    try:
+                        from app.business.purchase_approval import send_requester_approval_prompt
+                        po_scope = TelegramScope(
+                            telegram_user_id=req.telegram_user_id,
+                            chat_id=req.chat_id,
+                            telegram_binding_id=req.telegram_binding_id,
+                        )
+                        approval_token = send_requester_approval_prompt(
+                            request, ctx, user_id=user_id, scope=po_scope,
+                            record=rec, company_id=prepared['payload']['company_id'],
+                        )
+                        if approval_token:
+                            result['approval_prompt_sent'] = True
+                    except Exception as exc:
+                        logger.warning("Purchase approval prompt failed: %s", type(exc).__name__)
             response = {'status': 'completed', 'result': result}
             finish(sf, user_id, req.operation_id, op_key, 'completed', response, release=True)
             return response
@@ -296,3 +321,31 @@ def business_action_status(user_id, operation_id, binding, request):
                     'result': result.get('result'), 'message': result.get('message'),
                     'steps': [{'stage': step['stage'], 'at': step['at'], 'reference': {key: value for key, value in step['data'].items() if key in ('model', 'id', 'picking_id')}} for step in steps],
                     'automatic_retry': False}
+
+
+@router.post('/purchases/approval-submit')
+def purchase_approval_submit(user_id: int, body: PurchaseApprovalRequest, request: Request):
+    scope = TelegramScope(
+        telegram_user_id=body.telegram_user_id,
+        chat_id=body.chat_id,
+        telegram_binding_id=body.telegram_binding_id,
+    )
+    from app.business.purchase_approval import submit_purchase_approval
+    with authenticated_context(request, user_id, scope) as ctx:
+        return submit_purchase_approval(request, ctx, user_id=user_id, scope=scope, token=body.token)
+
+
+@router.post('/purchases/approval-decision')
+def purchase_approval_decision(user_id: int, body: PurchaseApprovalDecision, request: Request):
+    scope = TelegramScope(
+        telegram_user_id=body.telegram_user_id,
+        chat_id=body.chat_id,
+        telegram_binding_id=body.telegram_binding_id,
+    )
+    from app.business.purchase_approval import decide_purchase_approval
+    with authenticated_context(request, user_id, scope) as ctx:
+        return decide_purchase_approval(
+            request, ctx, user_id=user_id, scope=scope,
+            token=body.token,
+            decision=body.decision,
+        )

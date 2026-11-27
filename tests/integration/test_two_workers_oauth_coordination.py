@@ -2,23 +2,22 @@
 and preventing stale refresh tokens from overwriting newly relinked accounts.
 """
 import concurrent.futures
-from datetime import datetime, timedelta, UTC
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
 import os
 import socket
 import subprocess
 import sys
 import threading
 import time
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, User, GoogleConnection
-from app.workspace.models import OAuthRefreshLease
 from app.google.oauth import GoogleOAuthService
-
+from app.models import Base, GoogleConnection, User
+from app.workspace.models import OAuthRefreshLease
 
 FERNET_KEY = "_3pDgavXi1u3T76np_zSNJQcNS87hKW7fEdQXjlu3Ew="
 
@@ -393,34 +392,9 @@ def test_worker_failing_to_acquire_lease_times_out_and_refuses_refresh(multi_wor
         except TimeoutError:
             return "timed_out_safely"
 
-    # Set lease_seconds to small and simulate timeout
-    # Or run in event loop with quick timeout
-    async def fast_test():
-        # Temporarily mock max_wait_seconds to 0.2s for this test
-        original_get_valid = lease_mgr.get_valid_token
-        # Patching max_wait_seconds inside get_valid_token
-        lease_mgr.lease_seconds = 1  # max_wait_seconds will be 6.0, but let's test timeout
-        # Test directly by running with asyncio.wait_for or letting it fail when lease is held
-        with pytest.raises(TimeoutError):
-            # If max_wait_seconds = 0.2
-            # Let's run with wait_for 0.5s or test the TimeoutError directly
-            pass
-
-    # Direct test: ensure that if not lease_acquired, TimeoutError is raised and network_calls == 0
-    # Let's verify by calling get_valid_token with a monkeypatched small max_wait_seconds
-    import unittest.mock
-    with unittest.mock.patch("asyncio.sleep", side_effect=[None, None, asyncio.CancelledError]):
-        # Let's directly test the timeout block
-        pass
-
-    # Clean direct invocation of lease_mgr with small wait
-    # We can pass max_wait_seconds or patch asyncio.sleep to advance time
     class ShortWaitLeaseManager(DistributedOAuthLeaseManager):
         async def get_valid_token(self, user_id: int, force_refresh: bool = False) -> str:
             # Override to test the timeout branch with short max_wait_seconds = 0.2s
-            now = datetime.now(UTC)
-            expected_connection_version = 1
-            initial_token = "dummy"
             max_wait_seconds = 0.2
             start_wait = asyncio.get_event_loop().time()
             lease_acquired = False

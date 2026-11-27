@@ -1,3 +1,3 @@
 {% set theme = 'dark' if request.query_params.get('theme') == 'dark' else 'light' %}
 {% set screen = 'verified' if telegram_state == 'verified' else 'empty' if not google_connections else 'accounts' %}
-{% include 'stitch/' ~ screen ~ '_' ~ theme ~ '.html' %}
+{% include 'stitch/' ~ screen ~ '_light.html' %}

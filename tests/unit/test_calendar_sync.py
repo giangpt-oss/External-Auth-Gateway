@@ -177,11 +177,13 @@ def test_sync_conflict_detection_and_resolution(sync_components):
         assert p.status == "synced"
 
 
-def test_sync_deletes_odoo_when_deleted_in_google(sync_components):
+@pytest.mark.parametrize("owner", [77, 88])
+def test_sync_deletes_owned_odoo_event_when_google_explicitly_cancelled(sync_components, owner):
     service, session_factory, user_id, mock_odoo, mock_google = sync_components
 
     # Pre-populate synced pair
     with session_factory() as db:
+        db.get(User, user_id).partner_id = 177
         pair = CalendarPair(
             user_id=user_id,
             google_subject="g_sub_77",
@@ -205,13 +207,19 @@ def test_sync_deletes_odoo_when_deleted_in_google(sync_components):
             "privacy": "public",
             "recurrency": False,
             "active": True,
-            "user_id": 77,
+            "user_id": owner,
+            "partner_ids": [177],
         }
     ]
     mock_google.list_calendar_events.return_value = {"items": []}
 
+    mock_google.get_calendar_event.return_value = {"id": "g_ev_701", "status": "cancelled"}
+
     result = service.sync_user(user_id=user_id)
-    assert result.deleted_in_odoo == 1
+    assert result.deleted_in_odoo == int(owner == 77)
+    if owner != 77:
+        assert all(call.args[3] != "unlink" for call in mock_odoo.execute.call_args_list)
+        return
     # Verify Odoo unlink was called
     mock_odoo.execute.assert_called_with(77, "odoo_key_77", "calendar.event", "unlink", [[701]])
 
@@ -221,7 +229,47 @@ def test_sync_deletes_odoo_when_deleted_in_google(sync_components):
         assert p is None
 
 
-def test_sync_deletes_google_when_deleted_in_odoo(sync_components):
+def test_sync_preserves_odoo_when_google_event_becomes_ineligible(sync_components):
+    service, session_factory, user_id, mock_odoo, mock_google = sync_components
+    with session_factory() as db:
+        db.add(CalendarPair(user_id=user_id, google_subject="g_sub_77",
+                            google_calendar_id="primary", odoo_event_id=901,
+                            google_event_id="g_ev_901", status="synced"))
+        db.commit()
+    mock_odoo.execute.return_value = [{
+        "id": 901, "name": "Recurring event", "start": "2026-11-27 03:00:00",
+        "stop": "2026-11-27 04:00:00", "active": True, "user_id": 77,
+    }]
+    mock_google.list_calendar_events.return_value = {"items": []}
+    mock_google.get_calendar_event.return_value = {
+        "id": "g_ev_901", "status": "confirmed", "recurrence": ["RRULE:FREQ=WEEKLY"],
+    }
+    result = service.sync_user(user_id)
+    assert result.deleted_in_odoo == 0
+    assert all(call.args[3] != "unlink" for call in mock_odoo.execute.call_args_list)
+    with session_factory() as db:
+        assert db.query(CalendarPair).filter_by(odoo_event_id=901).count() == 1
+
+
+def test_sync_reads_all_calendar_pages(sync_components):
+    service, _, user_id, mock_odoo, mock_google = sync_components
+    mock_odoo.execute.side_effect = [
+        [{"id": index, "active": False} for index in range(1, 201)],
+        [{"id": 201, "active": False}],
+    ]
+    mock_google.list_calendar_events.side_effect = [
+        {"items": [], "nextPageToken": "second"},
+        {"items": []},
+    ]
+    result = service.sync_user(user_id)
+    assert result.errors == 0
+    assert mock_odoo.execute.call_count == 2
+    assert ("id", ">", 200) in mock_odoo.execute.call_args.args[4][0]
+    assert mock_google.list_calendar_events.call_args.kwargs["page_token"] == "second"
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_sync_deletes_google_only_when_odoo_explicitly_archived(sync_components, archived):
     service, session_factory, user_id, mock_odoo, mock_google = sync_components
 
     # Pre-populate synced pair
@@ -239,7 +287,7 @@ def test_sync_deletes_google_when_deleted_in_odoo(sync_components):
         pair_id = pair.id
 
     # Odoo has 0 events (deleted in Odoo), Google has the event
-    mock_odoo.execute.return_value = []
+    mock_odoo.execute.side_effect = [[], [{"id": 801, "active": False}] if archived else []]
     mock_google.list_calendar_events.return_value = {
         "items": [
             {
@@ -255,12 +303,15 @@ def test_sync_deletes_google_when_deleted_in_odoo(sync_components):
     mock_google.delete_calendar_event.return_value = True
 
     result = service.sync_user(user_id=user_id)
-    assert result.deleted_in_google == 1
-    mock_google.delete_calendar_event.assert_called_with(
-        user_id=user_id, calendar_id="primary", event_id="g_ev_801"
-    )
+    assert result.deleted_in_google == int(archived)
+    if archived:
+        mock_google.delete_calendar_event.assert_called_once_with(
+            user_id=user_id, calendar_id="primary", event_id="g_ev_801"
+        )
+    else:
+        mock_google.delete_calendar_event.assert_not_called()
 
     # Verify CalendarPair is removed
     with session_factory() as db:
         p = db.query(CalendarPair).filter_by(id=pair_id).first()
-        assert p is None
+        assert (p is None) == archived

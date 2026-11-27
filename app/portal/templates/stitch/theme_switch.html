@@ -1,0 +1,9 @@
+<button type="button" class="stitch-theme-switch" role="switch" aria-label="Giao diện tối"
+        aria-checked="{{ 'true' if request.query_params.get('theme') == 'dark' else 'false' }}"
+        data-stitch-theme-switch>
+  <span class="stitch-theme-track" aria-hidden="true">
+    <span class="material-symbols-outlined stitch-theme-sun">light_mode</span>
+    <span class="material-symbols-outlined stitch-theme-moon">dark_mode</span>
+    <span class="stitch-theme-thumb"></span>
+  </span>
+</button>

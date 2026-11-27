@@ -397,7 +397,7 @@ def employee_weekly_chat_summary(result):
     else:
         lines.append(f"• Cần lưu ý: Tỷ lệ hoàn thành công việc đạt {done_rate_num}%, có {task_stat.get('overdue_count', 0)} việc quá hạn.")
     if task_stat.get("overdue_count", 0) > 0:
-        lines.append(f"• Quản lý nên kiểm tra các task quá hạn để hỗ trợ tháo gỡ vướng mắc.")
+        lines.append("• Quản lý nên kiểm tra các task quá hạn để hỗ trợ tháo gỡ vướng mắc.")
     if sale_stat.get("confirmed_count", 0) > 0:
         lines.append(f"• Nhân viên có đóng góp doanh số thực tế: {Decimal(sale_stat.get('confirmed_value', 0)):,.2f} VNĐ trong kỳ.")
 

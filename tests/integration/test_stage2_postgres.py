@@ -110,12 +110,13 @@ async def test_two_processes_recover_drive_job_and_queue_one_delivery(pg_engine,
     from pathlib import Path
     from unittest.mock import Mock
 
-    from app.models import GoogleConnection, TelegramConnection, TelegramUpdate
-    from app.main import create_app
-    from app.security import encrypt_secret
-    from app.telegram.worker import TelegramAIWorker
     from cryptography.fernet import Fernet
     from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.models import GoogleConnection, TelegramConnection, TelegramUpdate
+    from app.security import encrypt_secret
+    from app.telegram.worker import TelegramAIWorker
 
     factory = sessionmaker(bind=pg_engine)
     suffix = uuid.uuid4().hex

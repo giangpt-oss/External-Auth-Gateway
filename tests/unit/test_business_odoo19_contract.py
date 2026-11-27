@@ -59,3 +59,27 @@ def test_snapshot_tracks_tax_changes_even_without_write_date():
     current['tax_ids'] = [5]
     with pytest.raises(Conflict):
         service.verify_snapshot(snapshot)
+
+
+def test_purchase_form_defaults_use_odoo_computed_line():
+    from unittest.mock import Mock
+
+    service = Fixture()
+    service.ctx.call = Mock(return_value={'value': {'currency_id': 23, 'order_line': [
+        [0, 0, {'product_id': 2, 'product_qty': 1, 'product_uom_id': {'id': 3},
+                'price_unit': 9500750, 'tax_ids': [[4, 8, {}]], 'date_planned': '2026-11-27 02:48:00'}],
+    ]}})
+    service.schema = lambda model: dict.fromkeys(
+        ('partner_id', 'company_id', 'currency_id', 'order_line') if model == 'purchase.order' else
+        ('product_id', 'product_qty', 'product_uom_id', 'price_unit', 'tax_ids', 'date_planned'), {}
+    )
+
+    defaults, lines = service.purchase_form_lines({'partner_id': 5}, [{'product_id': 2, 'quantity': 1}])
+
+    assert defaults == {'currency_id': 23}
+    assert lines == [{'product_id': 2, 'quantity': 1, 'uom_id': 3, 'price_unit': 9500750,
+                      'tax_ids': [8], 'date_planned': '2026-11-27 02:48:00+00:00'}]
+    model, method, args = service.ctx.call.call_args.args
+    assert (model, method, args[:1]) == ('purchase.order', 'onchange', [[]])
+    assert args[1]['partner_id'] == 5
+    assert args[1]['order_line'] == [(0, 0, {'product_id': 2, 'product_qty': 1})]

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, Optional
-from sqlalchemy.orm import Session
+from typing import Any
+
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.workspace.models import WorkspaceIdempotencyRecord
 
@@ -78,7 +79,7 @@ class IdempotencyManager:
         db.refresh(record)
         return record
 
-    def get_record(self, db: Session, operation_id: str) -> Optional[WorkspaceIdempotencyRecord]:
+    def get_record(self, db: Session, operation_id: str) -> WorkspaceIdempotencyRecord | None:
         return (
             db.query(WorkspaceIdempotencyRecord)
             .filter(WorkspaceIdempotencyRecord.operation_id == operation_id)
@@ -89,7 +90,7 @@ class IdempotencyManager:
         self,
         db: Session,
         operation_id: str,
-        resource_id: Optional[str],
+        resource_id: str | None,
         response_data: Any,
     ) -> WorkspaceIdempotencyRecord:
         record = self.get_record(db, operation_id)
@@ -117,7 +118,7 @@ class IdempotencyManager:
         self,
         db: Session,
         operation_id: str,
-        found_resource: Optional[Dict[str, Any]] = None,
+        found_resource: dict[str, Any] | None = None,
     ) -> WorkspaceIdempotencyRecord:
         """Reconcile an unknown_result operation."""
         record = self.get_record(db, operation_id)

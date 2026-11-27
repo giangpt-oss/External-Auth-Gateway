@@ -1,7 +1,8 @@
 """Persist Workspace callback delivery state and support large Telegram IDs."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "88af2d954a02"
 down_revision = "35696dbcf459"

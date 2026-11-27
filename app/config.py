@@ -1,3 +1,4 @@
+from functools import lru_cache
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -134,9 +135,8 @@ class Settings(BaseSettings):
         return self
 
 
-from functools import lru_cache
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     return Settings()

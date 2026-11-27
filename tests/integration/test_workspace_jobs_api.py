@@ -1,17 +1,14 @@
-import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
 from app.main import create_app
-from app.models import Base, GoogleConnection, User
+from app.models import GoogleConnection, User
 from app.security import encrypt_secret
-from app.workspace.models import WorkspaceJob, WorkspaceJobStatus
+from app.workspace.models import WorkspaceJob
 
 
 @pytest.fixture
@@ -76,7 +73,7 @@ def test_workspace_job_conflict_different_payload(client_with_db):
     # Create first job
     resp1 = client.post("/internal/v1/users/1/workspace/jobs", json=req_payload_1, headers=headers)
     assert resp1.status_code in (200, 202)
-    
+
     # Same request_id with different parameters -> 409 Conflict
     req_payload_2 = dict(req_payload_1)
     req_payload_2["parameters"] = {"calendarId": "secondary"}
@@ -100,7 +97,7 @@ def test_workspace_job_cancel(client_with_db):
     data = resp.json()
     job_id = data.get("job_id")
     assert job_id is not None
-    
+
     cancel_resp = client.post(f"/internal/v1/users/1/workspace/jobs/{job_id}/cancel", headers=headers)
     assert cancel_resp.status_code == 200
     assert cancel_resp.json()["status"] == "cancelled"
@@ -108,9 +105,10 @@ def test_workspace_job_cancel(client_with_db):
 
 def test_unknown_result_reconciles_only_matching_payload(client_with_db):
     from datetime import UTC, datetime, timedelta
+
+    from app.security import encrypt_secret
     from app.workspace.idempotency import compute_payload_hash
     from app.workspace.models import WorkspaceIdempotencyRecord
-    from app.security import encrypt_secret
 
     client, secret = client_with_db
     key = client.app.state.settings.ENCRYPTION_KEY

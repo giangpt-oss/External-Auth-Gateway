@@ -1,3 +1,5 @@
+from threading import Lock
+
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -13,14 +15,29 @@ from app.config import Settings
 from app.odoo.client import OdooAuthError, OdooClient, OdooNetworkError
 
 router = APIRouter(tags=["Authentication"])
+_service_lock = Lock()
 
 
 def get_auth_service(request: Request) -> AuthService:
+    with _service_lock:
+        service = getattr(request.app.state, "auth_service", None)
+        if service is None:
+            service = _create_auth_service(request)
+            request.app.state.auth_service = service
+        return service
+
+
+def _create_auth_service(request: Request) -> AuthService:
     settings: Settings = request.app.state.settings
     session_factory = request.app.state.session_factory
     odoo_client = getattr(request.app.state, "odoo_client", None)
     if not odoo_client:
-        odoo_client = OdooClient(url=settings.ODOO_URL, db=settings.ODOO_DB)
+        with request.app.state.outbound_clients_lock:
+            key = (settings.ODOO_URL, settings.ODOO_DB)
+            odoo_client = request.app.state.odoo_clients.get(key)
+            if odoo_client is None:
+                odoo_client = OdooClient(url=settings.ODOO_URL, db=settings.ODOO_DB)
+                request.app.state.odoo_clients[key] = odoo_client
 
     return AuthService(
         session_factory=session_factory,
@@ -137,26 +154,6 @@ def login(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"error": {"code": "RATE_LIMITED", "message": str(e)}},
         )
-    except (OdooAuthError, AuthError) as e:
-        is_html = "text/html" in request.headers.get("Accept", "")
-        if is_html:
-            from app.portal.routes import templates
-
-            return templates.TemplateResponse(
-                request=request,
-                name="login.html",
-                context={
-                    "csrf_token": request.cookies.get("anon_csrf", ""),
-                    "user": None,
-                    "error": "Thông tin đăng nhập không chính xác hoặc Odoo từ chối xác thực.",
-                    "login_value": login,
-                },
-                status_code=401,
-            )
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"error": {"code": "INVALID_CREDENTIALS", "message": str(e)}},
-        )
     except (InactiveUserError, PortalUserError) as e:
         is_html = "text/html" in request.headers.get("Accept", "")
         if is_html:
@@ -176,6 +173,26 @@ def login(
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
             content={"error": {"code": "ACCESS_DENIED", "message": str(e)}},
+        )
+    except (OdooAuthError, AuthError) as e:
+        is_html = "text/html" in request.headers.get("Accept", "")
+        if is_html:
+            from app.portal.routes import templates
+
+            return templates.TemplateResponse(
+                request=request,
+                name="login.html",
+                context={
+                    "csrf_token": request.cookies.get("anon_csrf", ""),
+                    "user": None,
+                    "error": "Thông tin đăng nhập không chính xác hoặc Odoo từ chối xác thực.",
+                    "login_value": login,
+                },
+                status_code=401,
+            )
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"error": {"code": "INVALID_CREDENTIALS", "message": str(e)}},
         )
     except OdooNetworkError as e:
         is_html = "text/html" in request.headers.get("Accept", "")

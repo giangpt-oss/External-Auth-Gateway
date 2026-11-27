@@ -36,7 +36,7 @@ class MockTelegramHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {"raw": body}
 
-        if "text" in payload:
+        if self.path.endswith("/sendMessage") and "text" in payload and "Đã chờ " not in payload["text"]:
             MockTelegramHandler.received_messages.append(payload)
 
             # Trigger hook if set (e.g. revoke user permissions after chunk 1)
@@ -135,12 +135,9 @@ def live_cross_app_env(tmp_path_factory, mock_tg_server):
     from pathlib import Path
 
     gw_dir = Path(__file__).resolve().parents[2]
-    agent_dir_cand = gw_dir.parents[1] / "Module AI - Agent"
-    if not agent_dir_cand.exists():
-        agent_dir_cand = Path(r"D:\ODOO\Module AI - Agent")
-    if not agent_dir_cand.exists():
-        agent_dir_cand = Path(r"D:\Module AI - Agent")
-    agent_dir = agent_dir_cand.resolve()
+    agent_dir = Path(os.environ.get("AI_AGENT_REPO", str(gw_dir.parent / "Module AI - Agent"))).resolve()
+    if not agent_dir.is_dir():
+        pytest.skip("Requires the sibling Agent repo or AI_AGENT_REPO")
 
     agent_py = agent_dir / ".venv" / "Scripts" / "python.exe"
     agent_python = str(agent_py) if agent_py.exists() else sys.executable
@@ -207,24 +204,14 @@ def live_cross_app_env(tmp_path_factory, mock_tg_server):
     )
 
     # 4. Wait for both servers to be ready
-    def wait_ready(url, timeout=25):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+    def wait_ready(url, timeout=90):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             try:
-                r = httpx.get(url, timeout=1.0)
-                if r.status_code in (200, 404):
+                response = httpx.get(url, timeout=1.0)
+                if response.status_code in (200, 404):
                     return True
-            except Exception:
-                pass
-            time.sleep(0.3)
-        return False
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                r = httpx.get(url, timeout=1.0)
-                if r.status_code in (200, 404):
-                    return True
-            except Exception:
+            except httpx.HTTPError:
                 pass
             time.sleep(0.3)
         return False
@@ -297,7 +284,10 @@ def test_live_cross_app_connection_status_ok(live_cross_app_env):
     deadline = time.time() + 15
     delivered = False
     while time.time() < deadline:
-        if len(tg_handler.received_messages) >= 1:
+        with session_factory() as db:
+            record = db.query(TelegramUpdate).filter_by(update_id=webhook_payload["update_id"]).first()
+            completed = record is not None and record.status == "processed"
+        if completed and tg_handler.received_messages:
             delivered = True
             break
         time.sleep(0.3)
@@ -364,7 +354,10 @@ def test_live_cross_app_connection_status_reconnect_required(live_cross_app_env)
     deadline = time.time() + 15
     delivered = False
     while time.time() < deadline:
-        if len(tg_handler.received_messages) >= 1:
+        with session_factory() as db:
+            record = db.query(TelegramUpdate).filter_by(update_id=webhook_payload["update_id"]).first()
+            completed = record is not None and record.status == "processed"
+        if completed and tg_handler.received_messages:
             delivered = True
             break
         time.sleep(0.3)

@@ -30,7 +30,16 @@ class ReportWorker:
         self.session_factory = session_factory
         self.stop_event = threading.Event()
         self.thread = None
-        self.request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings, session_factory=session_factory)))
+        self.request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    settings=settings,
+                    session_factory=session_factory,
+                    outbound_clients_lock=threading.Lock(),
+                    odoo_clients={},
+                )
+            )
+        )
 
     def start(self):
         if self.thread or not getattr(self.settings, "ENABLE_REPORTING", False):

@@ -4,13 +4,12 @@ Prevents thundering herd across multiple workspace workers and ensures
 only one process refreshes an expired Google access token at a time.
 """
 import asyncio
-from datetime import datetime, timedelta, UTC
 import logging
 import uuid
-from typing import Any, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import update
 
 from app.models import GoogleConnection
 from app.workspace.models import OAuthRefreshLease
@@ -18,7 +17,7 @@ from app.workspace.models import OAuthRefreshLease
 logger = logging.getLogger(__name__)
 
 
-def ensure_utc(dt: Optional[datetime]) -> datetime:
+def ensure_utc(dt: datetime | None) -> datetime:
     if dt is None:
         return datetime.min.replace(tzinfo=UTC)
     if dt.tzinfo is None:
@@ -30,7 +29,7 @@ class DistributedOAuthLeaseManager:
     def __init__(
         self,
         oauth_service: Any,
-        worker_id: Optional[str] = None,
+        worker_id: str | None = None,
         lease_seconds: int = 60,
     ):
         self.oauth_service = oauth_service
@@ -41,16 +40,16 @@ class DistributedOAuthLeaseManager:
         self,
         user_id: int,
         force_refresh: bool = False,
-        google_account_id: Optional[int] = None,
+        google_account_id: int | None = None,
     ) -> str:
         """Retrieve a valid Google access token with distributed lease locking keyed by Google account.
-        
+
         - If token is valid for > 5 minutes and force_refresh is False, returns token immediately.
         - If token is expiring or force_refresh is requested, acquires a lease to refresh.
         - Keyed by google_account_id so refresh on one account never blocks other accounts.
         """
         now = datetime.now(UTC)
-        
+
         # 1. Quick check without lease
         with self.oauth_service.session_factory() as db:
             from app.google.account_resolver import GoogleAccountResolver
@@ -72,10 +71,10 @@ class DistributedOAuthLeaseManager:
         max_wait_seconds = max(float(self.lease_seconds) + 5.0, 35.0)
         start_wait = asyncio.get_event_loop().time()
         lease_acquired = False
-        
+
         while True:
             now = datetime.now(UTC)
-            
+
             with self.oauth_service.session_factory() as db:
                 lease = db.query(OAuthRefreshLease).filter(
                     (OAuthRefreshLease.google_account_id == account_id)
@@ -126,7 +125,7 @@ class DistributedOAuthLeaseManager:
 
             # Another worker is refreshing: wait and poll
             await asyncio.sleep(0.1)
-            
+
             # Check if refreshed by the other worker
             with self.oauth_service.session_factory() as db:
                 conn = db.query(GoogleConnection).filter_by(id=account_id).first()
@@ -264,7 +263,7 @@ class DistributedOAuthLeaseManager:
         expiry_window_minutes: int = 5,
     ) -> list[int]:
         """Proactively refresh tokens for users whose tokens expire soon AND who were active recently.
-        
+
         - Filters users who had activity within `max_activity_minutes`.
         - Identifies tokens expiring within `expiry_window_minutes`.
         - Calls `get_valid_token(uid, force_refresh=True)` safely under distributed lease.

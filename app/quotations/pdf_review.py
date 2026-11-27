@@ -209,7 +209,7 @@ def _pdf_caption(order: dict[str, Any], prefix: str | None = None) -> str:
     lines.append(f"Báo giá {order.get('name')} · {state_lbl}")
     if order.get("amount_total") is not None:
         currency = order.get("currency_id") or []
-        cur_lbl = currency[1] if isinstance(currency, (list, tuple)) and len(currency) > 1 else ""
+        cur_lbl = currency[1] if isinstance(currency, list | tuple) and len(currency) > 1 else ""
         lines.append(f"Tổng tiền: {order['amount_total']} {cur_lbl}".strip())
     if order.get("approval"):
         st = order["approval"].get("status")

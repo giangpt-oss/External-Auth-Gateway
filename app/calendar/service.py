@@ -132,14 +132,20 @@ class CalendarSyncService:
         ]
 
         try:
-            raw_odoo_events = self.odoo_client.execute(
-                odoo_uid,
-                odoo_secret,
-                "calendar.event",
-                "search_read",
-                [odoo_domain],
-                {"fields": odoo_fields, "order": "id asc", "limit": 200},
-            )
+            raw_odoo_events = []
+            last_id = 0
+            while True:
+                page = self.odoo_client.execute(
+                    odoo_uid, odoo_secret, "calendar.event", "search_read",
+                    [odoo_domain + [("id", ">", last_id)]],
+                    {"fields": odoo_fields, "order": "id asc", "limit": 200},
+                )
+                raw_odoo_events.extend(page)
+                if len(page) < 200:
+                    break
+                if page[-1]["id"] <= last_id:
+                    raise RuntimeError("Odoo calendar pagination did not advance")
+                last_id = page[-1]["id"]
         except Exception as e:
             _logger.error(f"Error reading Odoo calendar for user {user_id}: {e}")
             result.errors += 1
@@ -153,12 +159,22 @@ class CalendarSyncService:
 
         # 2. Fetch Google events in window
         try:
-            g_resp = self.google_client.list_calendar_events(
-                user_id=user_id,
-                time_min=start_window.isoformat(),
-                time_max=end_window.isoformat(),
-            )
-            raw_google_events = g_resp.get("items", [])
+            raw_google_events = []
+            seen_tokens = set()
+            page_token = None
+            while True:
+                params = {"user_id": user_id, "time_min": start_window.isoformat(),
+                          "time_max": end_window.isoformat()}
+                if page_token:
+                    params["page_token"] = page_token
+                g_resp = self.google_client.list_calendar_events(**params)
+                raw_google_events.extend(g_resp.get("items", []))
+                page_token = g_resp.get("nextPageToken")
+                if not page_token:
+                    break
+                if page_token in seen_tokens:
+                    raise RuntimeError("Google calendar pagination did not advance")
+                seen_tokens.add(page_token)
         except Exception as e:
             _logger.error(f"Error reading Google calendar for user {user_id}: {e}")
             result.errors += 1
@@ -189,9 +205,45 @@ class CalendarSyncService:
             odoo_ev = eligible_odoo.get(pair.odoo_event_id)
             google_ev = eligible_google.get(pair.google_event_id)
 
-            # Check if source was deleted / canceled on either side
+            # Absence from a time window or an eligibility filter is not deletion.
+            google_deleted = False
+            odoo_archived = False
+            if odoo_ev and not google_ev:
+                try:
+                    observed = self.google_client.get_calendar_event(
+                        user_id=user_id, calendar_id="primary", event_id=pair.google_event_id,
+                    )
+                    google_deleted = isinstance(observed, dict) and observed.get("status") == "cancelled"
+                    if isinstance(observed, dict) and is_google_event_eligible(observed):
+                        google_ev = observed
+                except Exception:
+                    result.errors += 1
+                    continue
+            elif google_ev and not odoo_ev:
+                try:
+                    observed = self.odoo_client.execute(
+                        odoo_uid, odoo_secret, "calendar.event", "search_read",
+                        [[("id", "=", pair.odoo_event_id)]],
+                        {"fields": odoo_fields, "context": {"active_test": False}, "limit": 1},
+                    )
+                    if observed:
+                        odoo_archived = observed[0].get("active") is False
+                        if is_odoo_event_eligible(observed[0], odoo_uid, partner_id):
+                            odoo_ev = observed[0]
+                except Exception:
+                    result.errors += 1
+                    continue
             if not odoo_ev or not google_ev:
+                if not google_deleted and not odoo_archived:
+                    result.skipped += 1
+                    continue
                 if odoo_ev and not google_ev:
+                    owner = odoo_ev.get("user_id")
+                    if isinstance(owner, list | tuple):
+                        owner = owner[0] if owner else None
+                    if owner != odoo_uid:
+                        result.skipped += 1
+                        continue
                     # Event is active in Odoo window, but deleted / cancelled on Google -> Delete from Odoo!
                     try:
                         self.odoo_client.execute(

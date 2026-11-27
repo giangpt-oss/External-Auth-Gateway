@@ -149,13 +149,26 @@ class QuoteExecutionWorker(QuotePreparationWorker):
                             getattr(self.settings, 'ENABLE_QUOTATION_APPROVAL_FLOW', False)
                             and (result.get('approval') or {}).get('status') not in ('pending', 'approved')
                         )
+                        order_for_token = dict(result)
+                        if not order_for_token.get('write_date'):
+                            try:
+                                rows = ctx.call(
+                                    'sale.order',
+                                    'read',
+                                    [[result['id']]],
+                                    {'fields': ['write_date']},
+                                )
+                                if rows and rows[0].get('write_date'):
+                                    order_for_token['write_date'] = rows[0]['write_date']
+                            except Exception:
+                                pass
                         pdf_token = issue_sale_pdf_token(
                             self.sf,
                             user_id=user_id,
                             tenant=tenant,
                             database=database,
                             scope=scope,
-                            order=result,
+                            order=order_for_token,
                             company_id=result['company_id'][0],
                         )
                         keyboard = sale_pdf_keyboard(pdf_token, can_request_approval=can_req)

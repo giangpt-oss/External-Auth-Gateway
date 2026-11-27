@@ -1,8 +1,8 @@
 import asyncio
 import json
-import time
-import pytest
+
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -63,7 +63,6 @@ def integrated_env(tmp_path, monkeypatch):
 
     # Pre-seed user with Google connection
     from datetime import UTC, datetime, timedelta
-    from app.security import encrypt_secret
     with app.state.session_factory() as session:
         user = User(
             id=1,
@@ -303,6 +302,7 @@ async def test_end_to_end_jobs_flow_read_prepare_execute_and_invalid(integrated_
 async def test_deadline_at_dispatch_and_late_confirmation(integrated_env, monkeypatch, sent):
     import threading
     from datetime import UTC, datetime, timedelta
+
     from app.workspace.network_slots import outbound_slot
     from app.workspace.service import WorkspaceService
 
@@ -326,7 +326,6 @@ async def test_deadline_at_dispatch_and_late_confirmation(integrated_env, monkey
 
     monkeypatch.setattr(WorkspaceService, "execute", write)
     payload = {"action": "execute", "_ticket": "fixture", "operation_id": "late-op"}
-    from app.security import encrypt_secret
     with sf.begin() as db:
         db.add(WorkspaceJob(job_id="late-job", user_id=1, request_id="late-request", service="calendar",
                             operation="events.insert", action="execute", operation_id="late-op", is_write=True,

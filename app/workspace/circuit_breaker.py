@@ -1,6 +1,5 @@
 """Distributed / Per-(Account, Service) Circuit Breaker to prevent cascading failures."""
 import time
-from typing import Dict, Tuple
 
 
 class AccountServiceCircuitBreaker:
@@ -13,10 +12,10 @@ class AccountServiceCircuitBreaker:
     def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 30.0):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
-        self._failures: Dict[Tuple[int, str], int] = {}
-        self._tripped_until: Dict[Tuple[int, str], float] = {}
+        self._failures: dict[tuple[int, str], int] = {}
+        self._tripped_until: dict[tuple[int, str], float] = {}
 
-    def _key(self, user_id: int | tuple[int, int], service: str) -> Tuple[int | tuple[int, int], str]:
+    def _key(self, user_id: int | tuple[int, int], service: str) -> tuple[int | tuple[int, int], str]:
         return (user_id, service.lower())
 
     def record_failure(self, user_id: int | tuple[int, int], service: str) -> None:

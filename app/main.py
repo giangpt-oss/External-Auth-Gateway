@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from threading import Lock
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, status
 from fastapi.responses import JSONResponse
@@ -212,6 +213,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.session_factory = session_factory
     app.state.outbound_clients_lock = Lock()
     app.state.odoo_clients = {}
+
+    @app.middleware("http")
+    async def verify_browser_origin(request, call_next):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            origin = request.headers.get("origin")
+            try:
+                allowed = {
+                    (urlsplit(url).scheme, urlsplit(url).netloc)
+                    for url in (settings.PUBLIC_BASE_URL, str(request.base_url))
+                }
+                blocked = bool(origin and (urlsplit(origin).scheme, urlsplit(origin).netloc) not in allowed)
+            except ValueError:
+                blocked = True
+            if blocked or request.headers.get("sec-fetch-site") == "cross-site":
+                return JSONResponse(status_code=403, content={"detail": "Nguồn yêu cầu không hợp lệ."})
+        return await call_next(request)
 
     from app.workspace.network_slots import NetworkSlots, network_slots, outbound_user_id
 

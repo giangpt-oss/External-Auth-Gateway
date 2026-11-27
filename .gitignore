@@ -5,6 +5,7 @@ venv/
 
 # Environment files with secrets
 .env
+.env.*
 *.env
 !.env.example
 

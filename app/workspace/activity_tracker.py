@@ -6,7 +6,7 @@ Used to gate account-switching operations.
 """
 
 from datetime import UTC, datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -39,9 +39,9 @@ class WorkspaceActivityTracker:
         user_id: int,
         activity_type: str,
         reference_id: str,
-        google_account_id: Optional[int] = None,
+        google_account_id: int | None = None,
         has_outbound_write: bool = False,
-        lease_expires_at: Optional[datetime] = None,
+        lease_expires_at: datetime | None = None,
     ) -> WorkspaceActivity:
         """Register a new active Workspace activity that can hold an account-switch lock."""
         if google_account_id is None:
@@ -127,7 +127,7 @@ class WorkspaceActivityTracker:
     def get_active_blockers(
         db: Session,
         user_id: int,
-        account_id: Optional[int] = None,
+        account_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Scan all blocker sources for this user and account:
 

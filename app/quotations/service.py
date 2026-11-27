@@ -72,11 +72,18 @@ class QuotationService:
         self._schemas: dict[str, dict] = {}
         self._records: dict = {}
         self._company_cache: dict = {}
+        self._user_lang: str | None = None
         self._create_checked = False
 
     def _rpc(self, model: str, method: str, args: list, company_id: int | None = None, **kwargs):
+        ctx = dict(kwargs.get("context") or {})
         if company_id:
-            kwargs["context"] = {**kwargs.get('context', {}), "allowed_company_ids": [company_id], "force_company": company_id}
+            ctx.update({"allowed_company_ids": [company_id], "force_company": company_id})
+        user_lang = getattr(self, "_user_lang", None)
+        if user_lang and "lang" not in ctx:
+            ctx["lang"] = user_lang
+        if ctx:
+            kwargs["context"] = ctx
         return self.client.execute(self.uid, self.secret, model, method, args, kwargs)
 
     def _schema(self, model: str) -> dict:
@@ -87,9 +94,11 @@ class QuotationService:
     def _companies(self, company_id: int | None = None) -> tuple[int, list[int]]:
         if company_id in self._company_cache:
             return self._company_cache[company_id]
-        rows = self._rpc("res.users", "read", [[self.uid]], fields=["company_id", "company_ids"])
+        rows = self._rpc("res.users", "read", [[self.uid]], fields=["company_id", "company_ids", "lang"])
         if not rows:
             raise OdooAccessError("Không đọc được công ty của tài khoản.")
+        if isinstance(rows[0].get("lang"), str) and rows[0]["lang"]:
+            self._user_lang = rows[0]["lang"]
         allowed = rows[0].get("company_ids") or []
         chosen = _id(company_id, "company_id") if company_id is not None else _m2o(rows[0].get("company_id"))
         if not chosen or chosen not in allowed:
@@ -290,15 +299,34 @@ class QuotationService:
             searchable = [field for field in ('display_name', 'name', 'default_code') if field in schema]
             if searchable:
                 exact_domain = domain + ['|'] * (len(searchable) - 1) + [(field, '=ilike', term) for field in searchable]
-                exact = self._rpc(model, 'search_read', [exact_domain], company_id, fields=fields, order='id asc', limit=2)
-                if len(exact) == 1:
-                    return {'kind': kind, 'company_id': company_id, 'items': exact, 'exact_match_unique': True}
+                user_lang = getattr(self, "_user_lang", None)
+                langs_to_try = [user_lang]
+                if kind == 'payment_terms':
+                    for fallback_lang in ('vi_VN', 'en_US'):
+                        if fallback_lang not in langs_to_try:
+                            langs_to_try.append(fallback_lang)
+                for try_lang in langs_to_try:
+                    extra_ctx = {'context': {'lang': try_lang}} if try_lang else {}
+                    exact = self._rpc(model, 'search_read', [exact_domain], company_id, fields=fields, order='id asc', limit=2, **extra_ctx)
+                    if len(exact) == 1:
+                        return {'kind': kind, 'company_id': company_id, 'items': exact, 'exact_match_unique': True}
         if query.strip():
             term = query.strip()[:150]
             if kind == 'products' and 'default_code' in schema:
-                domain += ['|', ('display_name', 'ilike', term), ('default_code', 'ilike', term)]
+                sub_domain = domain + ['|', ('display_name', 'ilike', term), ('default_code', 'ilike', term)]
             else:
-                domain.append(('display_name', 'ilike', term))
+                sub_domain = domain + [('display_name', 'ilike', term)]
+            rows = self._rpc(model, "search_read", [sub_domain], company_id, fields=fields, order="id asc", limit=max(1, min(int(limit), 20)))
+            if not rows and kind == 'payment_terms':
+                user_lang = getattr(self, "_user_lang", None)
+                for alt_lang in ('vi_VN', 'en_US'):
+                    if alt_lang == user_lang:
+                        continue
+                    rows = self._rpc(model, "search_read", [sub_domain], company_id, fields=fields, order="id asc", limit=max(1, min(int(limit), 20)), context={'lang': alt_lang})
+                    if rows:
+                        break
+            return {"kind": kind, "company_id": company_id, "items": rows,
+                    "unique_query_match": bool(query.strip() and len(rows) == 1)}
         rows = self._rpc(model, "search_read", [domain], company_id, fields=fields, order="id asc", limit=max(1, min(int(limit), 20)))
         return {"kind": kind, "company_id": company_id, "items": rows,
                 "unique_query_match": bool(query.strip() and len(rows) == 1)}

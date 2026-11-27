@@ -1,140 +1,100 @@
-# Hướng Dẫn Vận Hành & Xử Lý Sự Cố — External Auth Gateway
+# Vận hành Auth Gateway
 
-Tài liệu dành cho kỹ sư vận hành hệ thống External Auth Gateway.
+Tài liệu dùng khi khởi động, xem log, sao lưu hoặc xử lý sự cố. Cấu hình ban đầu nằm trong [SETUP.md](SETUP.md).
 
----
+## Kiểm tra dịch vụ
 
-## 1. Quản lý Bí mật & Dữ liệu
-
-### 1.1. Khóa mã hóa `ENCRYPTION_KEY`
-- Sử dụng thuật toán AES-128 CBC thông qua thư viện `cryptography.fernet.Fernet`.
-- Dùng để mã hóa đối xứng:
-  - Mật khẩu / API Key cá nhân của nhân viên Odoo.
-  - Google OAuth Access Token và Refresh Token.
-  - PKCE Code Verifier tạm thời.
-- **Nguyên tắc bất di bất dịch**:
-  - Không sinh khóa mới khi khởi động lại ứng dụng.
-  - Khóa phải được lưu riêng biệt (biến môi trường hoặc secret manager), không lưu trong SQLite database hay trong image Docker.
-  - Phải sao lưu khóa ở nơi an toàn. Nếu mất khóa, toàn bộ token và credential đã lưu sẽ không thể giải mã và tất cả nhân viên phải đăng nhập/kết nối lại từ đầu.
-
-### 1.2. SQLite Database & Volume
-- Database được lưu tại `/data/gateway.db` trong volume Docker `auth_gateway_data`.
-- Chế độ WAL (Write-Ahead Logging) được bật tự động, `busy_timeout=10000ms`, `foreign_keys=ON`.
-
----
-
-## 2. Quy trình Sao lưu & Phục hồi (Backup & Restore)
-
-### 2.1. Sao lưu tự động / thủ công (Hot Online Backup)
-Dự án cung cấp sẵn script `scripts/backup.py` sử dụng SQLite Online Backup API. Script này tạo bản snapshot nhất quán ngay cả khi hệ thống đang xử lý request và ghi log WAL:
-
-```bash
-# Chạy backup từ host hoặc container:
-docker exec auth-gateway python scripts/backup.py --source /data/gateway.db --dest /data/backups
-
-# Hoặc chạy script từ máy chủ có mount volume:
-python scripts/backup.py --source ./data/gateway.db --dest ./backups
-```
-
-Tạo cronjob hàng ngày trên máy chủ để định kỳ sao lưu:
-```cron
-0 2 * * * docker exec auth-gateway python scripts/backup.py --dest /data/backups
-```
-
-### 2.2. Phục hồi dữ liệu (Restore)
-1. Dừng container ứng dụng:
-   ```bash
-   docker compose stop gateway
-   ```
-2. Sao chép file backup đè vào file database chính:
-   ```bash
-   cp /data/backups/gateway_backup_YYYYMMDD_HHMMSS.db /data/gateway.db
-   # Xóa các file WAL cũ nếu còn sót lại:
-   rm -f /data/gateway.db-wal /data/gateway.db-shm
-   ```
-3. Đảm bảo file `.env` chứa đúng `ENCRYPTION_KEY` tại thời điểm tạo bản backup đó.
-4. Khởi động lại container:
-   ```bash
-   docker compose start gateway
-   ```
-5. Kiểm tra endpoint `/healthz` và xem log:
-   ```bash
-   curl -i http://localhost:8000/healthz
-   docker compose logs -n 50 gateway
-   ```
-
----
-
-## 3. Xử lý các tình huống sự cố thường gặp
-
-### 3.1. Thông tin xác thực Odoo của nhân viên hết hiệu lực
-- **Hiện tượng**: Log ghi nhận `OdooAuthError` khi đồng bộ lịch hoặc tra cứu CRM.
-- **Hành vi hệ thống**: Gateway tự động dừng tác vụ đồng bộ lịch và nhắc họp của nhân viên đó.
-- **Cách xử lý**: Nhân viên đăng nhập lại vào Portal bằng tài khoản và mật khẩu Odoo hiện tại. Gateway mã hóa và cập nhật thông tin xác thực dùng cho các tác vụ nền.
-
-### 3.2. Google OAuth Token bị thu hồi (`invalid_grant`)
-- **Hiện tượng**: Job refresh token trả về lỗi `invalid_grant` (do user đổi mật khẩu Google hoặc thu hồi quyền truy cập).
-- **Hành vi hệ thống**: Chuyển trạng thái liên kết sang `reconnect_required`, ngừng spam retry. Trên Dashboard hiển thị badge cảnh báo "Cần kết nối lại".
-- **Cách xử lý**: Nhân viên truy cập Dashboard &rarr; nhấn "Kết nối lại Google Workspace". Lưu ý: Hệ thống chỉ cho phép kết nối lại cùng một tài khoản Google (`sub` khớp) để bảo toàn mapping lịch.
-
-### 3.3. Người dùng chặn Telegram Bot (Lỗi 403 `bot was blocked by the user`)
-- **Hành vi hệ thống**: Bắt exception `BotBlockedError`, tự động đánh dấu trạng thái Telegram của user thành `blocked`, ngừng gửi các tin nhắn trong outbox để tránh lãng phí tài nguyên và không bị Telegram rate limit bot.
-- **Cách xử lý**: Trên Dashboard hiển thị cảnh báo "Đã chặn Bot". Nhân viên cần mở Telegram &rarr; Unblock bot &rarr; bấm gửi lại `/start`.
-
-### 3.4. Xung đột lịch (Conflict)
-- **Hiện tượng**: Một sự kiện đã ghép đôi bị chỉnh sửa đồng thời ở cả Google Calendar và Odoo với dữ liệu nội dung khác nhau.
-- **Hành vi hệ thống**: Đánh dấu cặp lịch là `conflict`, không tự ý ghi đè mù quáng. Tạm dừng đồng bộ cặp lịch đó và hiển thị danh sách trên Dashboard.
-- **Cách xử lý**: Nhân viên vào Dashboard, xem mục "Xung đột lịch cần xử lý", chọn bấm "Giữ bản Odoo" hoặc "Giữ bản Google". Hệ thống sẽ đồng bộ bản được chọn sang phía còn lại và đưa trạng thái về `synced`.
-
-### 3.5. Sự kiện Odoo chờ đối soát (Ambiguous Intent)
-- **Hiện tượng**: Khi tạo lịch từ Google sang Odoo, request gặp timeout mạng hoặc container bị restart trước khi kịp nhận mã ID từ Odoo.
-- **Hành vi hệ thống**: Để ngăn chặn việc gọi tạo lại làm nhân đôi lịch trên Odoo, hệ thống chuyển `SyncIntent` sang `ambiguous`.
-- **Cách xử lý**: Nhân viên kiểm tra xem lịch đã xuất hiện trên Odoo chưa:
-  - Nếu đã tạo: Nhập ID sự kiện Odoo đó và nhấn "Gắn kết nối".
-  - Nếu chưa tạo: Bấm "Thử tạo lại".
-
----
-
-## 4. Kế hoạch Rollback (Thu hồi triển khai)
-
-Trong trường hợp cần ngừng thử nghiệm hoặc tháo gỡ Gateway:
-1. Dừng và gỡ container:
-   ```bash
-   docker compose down
-   ```
-2. **Không tự ý xóa hàng loạt dữ liệu lịch**:
-   - Tất cả các sự kiện đã tạo trên Google Calendar và Odoo Calendar đều là các bản ghi độc lập hợp lệ.
-   - Khi Gateway dừng lại, nhân viên vẫn xem và sử dụng lịch bình thường trên cả hai hệ thống mà không bị mất mát dữ liệu.
-3. Giữ nguyên volume `/data` và file `.env` nếu có kế hoạch kích hoạt lại sau đó.
-# Workspace workers với PostgreSQL 16
-
-`compose.yaml` chạy cấu hình SQLite cục bộ với một Workspace worker trong Gateway.
-Để chạy thử cấu hình PostgreSQL trên database mới, đặt `WORKSPACE_POSTGRES_PASSWORD`
-và `WORKSPACE_POSTGRES_URL` trong `.env`. URL dùng hostname `postgres`, tài khoản
-`gateway`, database `gateway` và mật khẩu đã mã hóa URL nếu có ký tự đặc biệt.
+Local chạy mặc định ở cổng 8080. Compose cũng công bố cổng 8080 trên host, còn ứng dụng trong container nghe ở 8000.
 
 ```powershell
-docker compose -f compose.yaml -f compose.postgres.yaml up --build gateway workspace-worker drive-indexer
+Invoke-WebRequest -UseBasicParsing http://localhost:8080/healthz
+docker compose ps
+docker compose logs --tail 100 gateway
 ```
 
-Compose chờ PostgreSQL sẵn sàng và bước `migrate` hoàn tất trước khi chạy Gateway
-hai worker tương tác và một worker tải tệp Drive nền. Database mới lấy schema hiện tại và ghi revision Alembic. Database
-đã có revision được nâng cấp qua Alembic. Database có dữ liệu nhưng chưa có revision
-cần kiểm tra schema trước khi tiếp nhận. Lệnh trên tạo PostgreSQL riêng và không
-nhập dữ liệu SQLite. Dùng môi trường thử hoặc bản sao đã kiểm tra trước khi đổi
-database của hệ thống đang chạy.
+Healthcheck cho biết ứng dụng và kiểm tra sức khỏe của nó phản hồi. Tiếp tục thử đăng nhập và gọi dịch vụ để kiểm tra kết nối Odoo hoặc Google của từng tài khoản.
 
-Worker gia hạn lease mỗi 15 giây. Nếu lease hết hạn, worker khác được nhận lại
-tác vụ đọc trong deadline gốc. Tác vụ ghi có thể đã gửi được chuyển sang
-`unknown_result`. Callback được lưu cùng kết quả và thử lại sau 30 giây khi giao lỗi.
+## Theo dõi lỗi từ một tin nhắn
 
-Khi Gateway có `ENABLE_AI_AGENT_FORWARDING=true` và Agent kết nối được với Gateway,
-đặt `WORKSPACE_BACKGROUND_READS=true` ở Agent để đưa các lệnh đọc công cụ Workspace
-vào hàng đợi. Sau khi xác minh liên kết, Agent định dạng kết quả, lưu lịch sử theo
-`job_id` và trả nội dung cho Gateway. Gateway đưa nội dung vào hàng đợi Telegram
-hiện có và kiểm tra lại người nhận trước khi gửi.
+1. Lấy update_id hoặc request_id của lượt Telegram.
+2. Tìm request_id trong log Gateway và log Agent.
+3. Nếu xử lý nền, tìm tiếp job_id trong log worker.
+4. Nếu ghi dữ liệu, tìm operation_id và trạng thái trong API Actions.
+5. Đối chiếu bản ghi thực tế trên Odoo hoặc Google khi kết quả còn chưa xác định.
 
-Worker Drive nhận tác vụ `action=index`, `service=drive`, `operation=index.fetch`
-với `parameters.fileId`. Đây là đơn vị tải một tệp có thể tiếp quản sau khi worker
-mất lease. Quét danh sách, checkpoint đồng bộ và parse/embedding được triển khai
-ở giai đoạn 4.
+```powershell
+docker compose logs --since 10m gateway | Select-String -SimpleMatch 'tg-12345'
+```
+
+Các file cần đọc theo tình huống nằm trong bảng dưới.
+
+| Tình huống | Vị trí |
+|---|---|
+| Update Telegram chưa chuyển sang Agent | app/telegram/routes.py, app/telegram/worker.py |
+| Danh tính hoặc quyền bị từ chối | app/internal/identity.py, app/internal/dependencies.py |
+| Action lỗi hoặc cần đối soát | app/internal/actions.py |
+| Business prepare hoặc thực thi lỗi | app/business/routes.py, app/business/service.py |
+| Workspace job hoặc callback chậm | app/workspace/worker.py, app/workspace/routes.py |
+| Đọc Drive hoặc chỉ mục lỗi | app/workspace/drive_retriever.py, app/workspace/drive_runtime.py |
+| Báo cáo hoặc báo giá chậm | app/reporting/worker.py, app/quotations/jobs.py |
+
+## Sao lưu SQLite
+
+Kiểm tra DATABASE_URL trước khi chọn đường dẫn nguồn. Local thường dùng ./data/gateway.db, Compose dùng /data/gateway.db.
+
+Script [backup.py](../scripts/backup.py) dùng SQLite Online Backup API để tạo bản sao nhất quán khi database đang hoạt động.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/backup.py --source ./data/gateway.db --dest ./backups
+docker compose exec gateway python scripts/backup.py --source /data/gateway.db --dest /data/backups
+```
+
+Bản sao trong /data/backups vẫn nằm cùng volume dữ liệu. Chuyển bản sao sang nơi lưu trữ độc lập theo quy trình vận hành. Lưu ENCRYPTION_KEY ở nơi bảo mật và bảo đảm có thể tìm lại đúng khóa tương ứng khi phục hồi.
+
+## Phục hồi SQLite
+
+1. Dừng Gateway, poller và mọi worker đang dùng database đó.
+2. Sao lưu lại dữ liệu hiện tại trước khi thay thế.
+3. Kiểm tra bản sao bằng SQLite integrity_check.
+4. Khôi phục vào database mới, giữ riêng bộ database cũ cùng các file WAL/SHM liên quan.
+5. Trỏ DATABASE_URL đến bản phục hồi hoặc thay bộ dữ liệu tại vị trí đã xác minh.
+6. Khởi động với ENCRYPTION_KEY tương ứng.
+7. Kiểm tra healthcheck, đăng nhập, liên kết và trạng thái tác vụ dở dang.
+
+Đối với PostgreSQL, dùng công cụ sao lưu và phục hồi PostgreSQL theo môi trường triển khai. scripts/backup.py phục vụ SQLite.
+
+## Khởi động PostgreSQL và worker riêng
+
+```powershell
+docker compose -f compose.yaml -f compose.postgres.yaml up -d --build gateway workspace-worker drive-indexer
+docker compose -f compose.yaml -f compose.postgres.yaml logs --tail 100 workspace-worker drive-indexer
+```
+
+Migration chạy qua service migrate. WORKSPACE_EMBEDDED_WORKER=false được đặt trong cấu hình này. Kiểm tra log từng worker và database URL thực tế khi job đã tạo nhưng chưa được nhận.
+
+Lease là thời hạn một worker giữ quyền xử lý job. Khi worker mất kết nối, khả năng nhận lại phụ thuộc trạng thái job và việc lệnh ghi đã được gửi đi hay chưa. Đọc trạng thái và dấu vết thực thi trước khi can thiệp.
+
+## Xử lý sự cố thường gặp
+
+| Hiện tượng | Kiểm tra và cách xử lý |
+|---|---|
+| Đăng nhập Odoo thất bại | Kiểm tra tenant, database, tài khoản và lỗi trả từ Odoo. Đăng nhập lại khi credential hết hiệu lực |
+| Google yêu cầu kết nối lại | Kiểm tra OAuth client, scope, trạng thái token và tài khoản đang chọn. Cấp quyền lại trên Portal |
+| Bot chưa nhận tin | Kiểm tra liên kết private chat, token bot, poller hoặc webhook, callback_query và log hàng đợi |
+| Agent trả 401 hoặc 403 | Đối chiếu secret theo từng chiều, binding và phạm vi tài khoản |
+| Gateway gọi Agent không được | Kiểm tra AI_AGENT_BASE_URL từ môi trường Gateway đang chạy |
+| UNKNOWN_RESULT | Giữ operation_id, tra cứu trạng thái và đối chiếu dịch vụ đích |
+| delivery_unknown | Kiểm tra tin thực tế trong Telegram và log giao nhận trước khi gửi lại |
+| Business prepare bị chặn | Kiểm tra cờ phân hệ, quyền Odoo, trạng thái chứng từ, trường bắt buộc và quy trình duyệt |
+| Job ở trạng thái chờ lâu | Kiểm tra worker, lease, deadline và callback |
+
+## Dừng hoặc cập nhật dịch vụ
+
+Có thể tắt chuyển hội thoại bằng ENABLE_AI_AGENT_FORWARDING=false rồi khởi động lại Gateway. Trước khi cập nhật phiên bản, sao lưu dữ liệu và ghi lại cấu hình, revision migration, phiên bản code đang chạy.
+
+```powershell
+docker compose stop gateway
+docker compose up -d --build gateway
+```
+
+Dữ liệu cần giữ để phục hồi gồm database, file xuất cần sử dụng, khóa mã hóa và cấu hình triển khai. Khi chia sẻ log, chỉ gửi thông tin cần đối soát và che credential, token cùng dữ liệu cá nhân.
