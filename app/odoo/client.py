@@ -97,10 +97,15 @@ class OdooClient:
         if hasattr(self, "_http_pool") and not self._http_pool.is_closed:
             self._http_pool.close()
 
-    def studio_approval_spec(self, uid, secret, record_id, method, company_id):
+    def studio_approval_spec(self, uid, secret, record_id, method, company_id, model='sale.order'):
         """Studio returns integer map keys, unsupported by XML-RPC serialization."""
-        if method not in ('action_confirm', 'action_quotation_send'):
-            raise OdooError('Unsupported quotation approval method.')
+        allowed = {
+            ('sale.order', 'action_confirm'),
+            ('sale.order', 'action_quotation_send'),
+            ('purchase.order', 'button_confirm'),
+        }
+        if (model, method) not in allowed:
+            raise OdooError('Unsupported Studio approval method.')
         try:
             response = self._http_pool.post(
                 self.url + '/jsonrpc',
@@ -113,7 +118,7 @@ class OdooClient:
                         'method': 'execute_kw',
                         'args': [
                             self.db, uid, secret, 'studio.approval.rule', 'get_approval_spec',
-                            [[{'model': 'sale.order', 'method': method, 'action_id': False, 'res_id': record_id}]],
+                            [[{'model': model, 'method': method, 'action_id': False, 'res_id': record_id}]],
                             {'context': {'allowed_company_ids': [company_id], 'force_company': company_id}}
                         ]
                     }

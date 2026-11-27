@@ -241,7 +241,7 @@ class TelegramService:
         legacy_quote_btn = re.fullmatch(r"(?:qe|qs|qa|qg|qr):[0-9a-f]{24}", data) if isinstance(data, str) else None
         opt_choice = data[4:].strip() if isinstance(data, str) and data.startswith("opt:") and len(data) > 4 else None
         quote_btn = re.fullmatch(r"(qedit|qappr|qgrant|qfeed):([0-9a-f]{24})", data) if isinstance(data, str) else None
-        purchase_btn = re.fullmatch(r"(pappr|pgrant|prej):([0-9a-f]{24})", data) if isinstance(data, str) else None
+        purchase_btn = re.fullmatch(r"(pedit|pappr|pgrant|pfeed|prej):([0-9a-f]{24})", data) if isinstance(data, str) else None
         message = callback.get("message") or {}
         actor = callback.get("from") or {}
         chat = message.get("chat") or {}
@@ -304,11 +304,13 @@ class TelegramService:
         elif purchase_btn and is_private_human:
             kind, ptoken = purchase_btn.groups()
             cmd_map = {
+                "pedit": "/purchase_edit",
                 "pappr": "/purchase_approve",
                 "pgrant": "/purchase_grant",
+                "pfeed": "/purchase_feedback",
                 "prej": "/purchase_reject",
             }
-            should_clear_keyboard = True
+            should_clear_keyboard = kind in ("pappr", "pgrant", "prej")
             result = self.ingest_update({"update_id": update.get("update_id"), "message": {
                 "chat": chat, "from": actor, "text": f"{cmd_map[kind]} {ptoken}",
             }})

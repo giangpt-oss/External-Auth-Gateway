@@ -196,7 +196,7 @@ def execute_business_action(user_id, req, request):
                         parent_operation_id=req.operation_id, data_json=dumps(continuation), expires_at=time.time() + 300))
                     db.commit()
                 result['continuation_token'] = token
-            if req.action == 'business.purchases.create' and result.get('status') == 'completed':
+            if req.action in ('business.purchases.create', 'business.purchases.update') and result.get('status') == 'completed':
                 rec = result.get('record') or {}
                 if rec.get('state') in ('draft', 'sent'):
                     try:
@@ -323,6 +323,18 @@ def business_action_status(user_id, operation_id, binding, request):
                     'automatic_retry': False}
 
 
+@router.post('/purchases/edit-context')
+def purchase_edit_context(user_id: int, body: PurchaseApprovalRequest, request: Request):
+    scope = TelegramScope(
+        telegram_user_id=body.telegram_user_id,
+        chat_id=body.chat_id,
+        telegram_binding_id=body.telegram_binding_id,
+    )
+    from app.business.purchase_approval import start_purchase_edit
+    with authenticated_context(request, user_id, scope) as ctx:
+        return start_purchase_edit(request, ctx, user_id=user_id, scope=scope, token=body.token)
+
+
 @router.post('/purchases/approval-submit')
 def purchase_approval_submit(user_id: int, body: PurchaseApprovalRequest, request: Request):
     scope = TelegramScope(
@@ -333,6 +345,27 @@ def purchase_approval_submit(user_id: int, body: PurchaseApprovalRequest, reques
     from app.business.purchase_approval import submit_purchase_approval
     with authenticated_context(request, user_id, scope) as ctx:
         return submit_purchase_approval(request, ctx, user_id=user_id, scope=scope, token=body.token)
+
+
+class PurchaseFeedbackRequest(PurchaseApprovalRequest):
+    feedback: str = ""
+
+
+@router.post('/purchases/approval-feedback')
+def purchase_approval_feedback(user_id: int, body: PurchaseFeedbackRequest, request: Request):
+    scope = TelegramScope(
+        telegram_user_id=body.telegram_user_id,
+        chat_id=body.chat_id,
+        telegram_binding_id=body.telegram_binding_id,
+    )
+    from app.business.purchase_approval import request_purchase_feedback_context, submit_purchase_feedback
+    with authenticated_context(request, user_id, scope) as ctx:
+        if body.feedback.strip():
+            return submit_purchase_feedback(
+                request, ctx, user_id=user_id, scope=scope,
+                token=body.token, feedback_text=body.feedback.strip(),
+            )
+        return request_purchase_feedback_context(request, ctx, user_id=user_id, scope=scope, token=body.token)
 
 
 @router.post('/purchases/approval-decision')
