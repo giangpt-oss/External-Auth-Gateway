@@ -177,3 +177,8 @@ class ApprovalSyncWorker:
     def _run(self):
         while not self.stop_event.wait(60):
             reconcile_once(self.settings, self.sf)
+            try:
+                from app.business.purchase_approval import reconcile_purchase_approvals
+                reconcile_purchase_approvals(self.settings, self.sf)
+            except Exception as exc:
+                logger.warning("Purchase approval sync failed: %s", type(exc).__name__)

@@ -341,8 +341,13 @@ class BusinessService:
             require_review(self, record)
             track_rules(self, state)
             verified_studio = True
+        elif definition.model == 'purchase.order' and definition.method == 'button_confirm':
+            from app.business.purchase_approval import PurchaseStudioApproval
+            PurchaseStudioApproval(self.ctx, self.company_id).require_approved(record['id'])
+            verified_studio = True
         controls = [name for name in meta if name.startswith('x_') and re.search('approv|duyet|grant', name, re.I)]
-        if any(name != 'x_studio_a_phe_duyet' or not verified_studio for name in controls):
+        known_studio = lambda n: n == 'x_studio_a_phe_duyet' or bool(re.fullmatch(r'x_studio_a_phe_duyet_\d+', n))
+        if any((not known_studio(name)) or not verified_studio for name in controls):
             raise Unsupported('Chứng từ có phê duyệt tùy chỉnh chưa xác minh; hãy thực hiện bước này trên Odoo.')
         view = self.ctx.call(definition.model, 'get_view', [], {'view_type': 'form'})
         if any(re.search('approv|studio_approval', key, re.I) and value for key, value in view.items() if key != 'arch'):
@@ -703,19 +708,18 @@ class BusinessService:
                     self.rules('product.template', [template['id']], 'write')
                     preview['notice'] += ' Các trường dùng chung sẽ áp dụng cho mọi biến thể của cùng mẫu sản phẩm.'
                     preview['affected_variant_ids'] = template.get('product_variant_ids', [])
-            preview['changes'] = [{'field': name, 'label': self.schema(model).get(name, {}).get('string', name), 'before': row.get(name) if row else None, 'after': value} for name, value in values.items() if name != 'order_line']
+            preview['changes'] = [{'field': name, 'label': self.schema(model).get(name, {}).get('string', name), 'before': row.get(name) if row else None, 'after': value} for name, value in values.items() if name not in {'order_line', 'company_id'}]
             if definition.module == 'purchases':
                 labels = {
                     'partner_id': 'Nhà cung cấp',
-                    'partner_ref': 'Mã tham chiếu NCC',
+                    'partner_ref': 'Mã nhà cung cấp',
                     'currency_id': 'Tiền tệ',
                     'payment_term_id': 'Điều khoản thanh toán',
                     'date_order': 'Hạn đặt hàng',
-                    'date_planned': 'Ngày nhận dự kiến',
+                    'date_planned': 'Ngày nhận hàng dự kiến',
                     'picking_type_id': 'Giao hàng đến',
                     'user_id': 'Người mua',
                     'notes': 'Ghi chú',
-                    'company_id': 'Công ty',
                 }
                 for change in preview['changes']:
                     field = change['field']
