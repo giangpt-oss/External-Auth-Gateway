@@ -34,4 +34,6 @@ def test_waiting_for_slot_uses_remaining_budget():
             pytest.fail("The unavailable slot must not be granted")
     finally:
         request_deadline.reset(token)
-    assert len(waits) == 1 and 0 < waits[0] <= 0.2
+    assert len(waits) == 1
+    # Subtracting large monotonic timestamps can round a 200 ms budget slightly upward.
+    assert 0 < waits[0] <= 0.2 + 1e-9

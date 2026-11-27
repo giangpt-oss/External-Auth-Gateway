@@ -60,7 +60,16 @@ class QuotePreparationWorker:
         self.settings, self.sf = settings, session_factory
         self.stop_event = threading.Event()
         self.thread = None
-        self.request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings, session_factory=session_factory)))
+        self.request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    settings=settings,
+                    session_factory=session_factory,
+                    outbound_clients_lock=threading.Lock(),
+                    odoo_clients={},
+                )
+            )
+        )
 
     def start(self):
         self.thread = threading.Thread(target=self.run, daemon=True, name='QuotePreparationWorker')

@@ -1,14 +1,15 @@
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Base, User
 from app.workspace.models import (
+    OAuthRefreshLease,
+    WorkspaceIdempotencyRecord,
     WorkspaceJob,
     WorkspaceJobStatus,
-    WorkspaceIdempotencyRecord,
-    OAuthRefreshLease,
 )
 
 
@@ -18,7 +19,7 @@ def db_session():
     Base.metadata.create_all(bind=engine)
     session_factory = sessionmaker(bind=engine)
     session = session_factory()
-    
+
     user = User(
         tenant="https://odoo.local",
         database="odoo_db",
@@ -28,7 +29,7 @@ def db_session():
     )
     session.add(user)
     session.commit()
-    
+
     yield session
     session.close()
 
@@ -51,7 +52,7 @@ def test_create_workspace_job(db_session):
     )
     db_session.add(job)
     db_session.commit()
-    
+
     saved = db_session.query(WorkspaceJob).filter_by(job_id="wsjob_test_001").first()
     assert saved is not None
     assert saved.status == WorkspaceJobStatus.QUEUED
@@ -70,7 +71,7 @@ def test_workspace_idempotency_record(db_session):
     )
     db_session.add(rec)
     db_session.commit()
-    
+
     saved = db_session.query(WorkspaceIdempotencyRecord).filter_by(operation_id="op_cal_001").first()
     assert saved is not None
     assert saved.resource_id == "event_google_id_777"
@@ -87,7 +88,7 @@ def test_oauth_refresh_lease(db_session):
     )
     db_session.add(lease)
     db_session.commit()
-    
+
     saved = db_session.query(OAuthRefreshLease).filter_by(user_id=1).first()
     assert saved is not None
     assert saved.lease_holder == "worker_proc_1"

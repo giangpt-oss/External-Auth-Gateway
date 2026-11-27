@@ -125,6 +125,7 @@ class TelegramClient:
         preserve_text: bool = False,
         reply_markup: dict[str, Any] | None = None,
         option_buttons: list[str] | None = None,
+        inline_keyboard: list[list[dict[str, str]]] | None = None,
     ) -> dict[str, Any]:
         if not self.bot_token:
             _logger.warning("Telegram Bot Token is not configured. Skipping send_message.")
@@ -137,7 +138,9 @@ class TelegramClient:
             "text": text if preserve_text else plain_text(text),
             "disable_web_page_preview": disable_web_page_preview,
         }
-        if confirmation_id:
+        if inline_keyboard:
+            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+        elif confirmation_id:
             payload["reply_markup"] = {"inline_keyboard": [[
                 {"text": "Xác nhận", "callback_data": f"confirm:{confirmation_id}"},
                 {"text": "Từ chối", "callback_data": f"cancel:{confirmation_id}"},
@@ -155,7 +158,12 @@ class TelegramClient:
 
         try:
             resp = httpx.post(url, json=payload, timeout=15.0)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise TelegramDeliveryUnknownError("Telegram returned an unreadable message result") from exc
+            if not isinstance(data, dict):
+                raise TelegramDeliveryUnknownError("Telegram returned an invalid message result")
 
             if resp.status_code == 403:
                 raise BotBlockedError(
@@ -172,8 +180,11 @@ class TelegramClient:
                     f"Telegram API Error: {data.get('description', 'Unknown error')}"
                 )
 
-            return data.get("result", {})
-        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            result = data.get("result")
+            if not isinstance(result, dict) or not result.get("message_id"):
+                raise TelegramDeliveryUnknownError("Telegram message lacks a confirmed identifier")
+            return result
+        except httpx.TransportError as e:
             raise TelegramDeliveryUnknownError(f"Network error connecting to Telegram: {e}") from e
 
     def answer_callback_query(self, callback_id: str, text: str | None = None) -> None:
@@ -263,5 +274,46 @@ class TelegramClient:
             return bool(data.get("ok"))
         except Exception as e:
             _logger.debug("Failed to sendChatAction %s to chat %s: %s", action, chat_id, e)
+            return False
+
+    def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        disable_web_page_preview: bool = True,
+    ) -> bool:
+        if not self.bot_token:
+            return False
+        url = self._get_url("editMessageText")
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": plain_text(text),
+            "disable_web_page_preview": disable_web_page_preview,
+        }
+        try:
+            resp = httpx.post(url, json=payload, timeout=5.0)
+            data = resp.json()
+            return bool(data.get("ok"))
+        except Exception as e:
+            _logger.debug("Failed to editMessageText %s/%s: %s", chat_id, message_id, e)
+            return False
+
+    def delete_message(
+        self,
+        chat_id: int | str,
+        message_id: int,
+    ) -> bool:
+        if not self.bot_token:
+            return False
+        url = self._get_url("deleteMessage")
+        payload = {"chat_id": chat_id, "message_id": message_id}
+        try:
+            resp = httpx.post(url, json=payload, timeout=5.0)
+            data = resp.json()
+            return bool(data.get("ok"))
+        except Exception as e:
+            _logger.debug("Failed to deleteMessage %s/%s: %s", chat_id, message_id, e)
             return False
 

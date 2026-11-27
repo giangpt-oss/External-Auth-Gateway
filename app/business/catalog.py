@@ -100,7 +100,8 @@ add('activities', 'mail.activity', 'done', 'Hoàn tất hoạt động', 'activi
 add('notes', 'mail.thread', 'create', 'Thêm ghi chú nội bộ', 'note')
 
 LOOKUPS = {
-    'contacts': 'res.partner', 'products': 'product.product', 'sales': 'sale.order', 'purchases': 'purchase.order',
+    'contacts': 'res.partner', 'suppliers': 'res.partner', 'products': 'product.product',
+    'purchase_products': 'product.product', 'sales': 'sale.order', 'purchases': 'purchase.order',
     'crm': 'crm.lead', 'stock': 'stock.picking', 'quants': 'stock.quant', 'activities': 'mail.activity',
     'warehouses': 'stock.warehouse', 'locations': 'stock.location', 'picking_types': 'stock.picking.type',
     'lots': 'stock.lot', 'users': 'res.users', 'stages': 'crm.stage', 'teams': 'crm.team',

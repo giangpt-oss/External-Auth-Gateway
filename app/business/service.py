@@ -119,7 +119,17 @@ class BusinessService:
 
     def group(self, external_id):
         if external_id not in self._groups:
-            self._groups[external_id] = bool(self.ctx.call('res.users', 'has_group', [external_id]))
+            uid = getattr(getattr(self.ctx, 'user', None), 'odoo_uid', None)
+            try:
+                if uid:
+                    self._groups[external_id] = bool(self.ctx.call('res.users', 'has_group', [[uid], external_id]))
+                else:
+                    self._groups[external_id] = bool(self.ctx.call('res.users', 'has_group', [external_id]))
+            except Exception as exc:
+                if uid and 'has_group' in str(exc):
+                    self._groups[external_id] = bool(self.ctx.call('res.users', 'has_group', [external_id]))
+                else:
+                    raise
         return self._groups[external_id]
 
     def record(self, model, record_id, fields=None, track=True):
@@ -162,6 +172,18 @@ class BusinessService:
         meta = self.schema(model)
         fields = [f for f in ('id', 'display_name', 'name', 'email', 'default_code', 'state', 'company_id', 'product_id', 'location_id', 'lot_id', 'quantity', 'reserved_quantity', 'product_uom_qty', 'partner_id', 'type') if f == 'id' or f in meta]
         domain = []
+        if kind in ('suppliers', 'purchase_products') and 'active' in meta:
+            domain.append(('active', '=', True))
+        if kind == 'purchase_products' and 'purchase_ok' in meta:
+            domain.append(('purchase_ok', '=', True))
+        if kind == 'suppliers' and not query and 'supplier_rank' in meta:
+            domain.append(('supplier_rank', '>', 0))
+        if kind == 'purchases':
+            fields.extend(f for f in ('amount_untaxed', 'amount_tax', 'amount_total', 'currency_id', 'order_line') if f in meta)
+        if kind == 'stock':
+            fields.extend(f for f in ('picking_type_id', 'location_id', 'location_dest_id', 'origin', 'scheduled_date', 'move_ids', 'move_line_ids') if f in meta)
+        if kind == 'picking_types':
+            fields.extend(f for f in ('code', 'default_location_src_id', 'default_location_dest_id', 'return_picking_type_id', 'warehouse_id') if f in meta)
         if 'company_id' in meta:
             domain += ['|', ('company_id', '=', False), ('company_id', '=', self.company_id)]
         if kind == 'models':
@@ -174,6 +196,25 @@ class BusinessService:
             else:
                 domain += [('display_name', 'ilike', query)]
         items = self.ctx.call(model, 'search_read', [domain], {'fields': fields, 'limit': 21, 'context': {'active_test': False}})
+        if kind == 'purchases' and query:
+            exact = [row for row in items if str(row.get('name', '')).casefold() == query.strip().casefold()]
+            if len(exact) == 1 and len(items) <= 20:
+                row = exact[0]
+                line_fields = ('product_id', 'name', 'product_qty', 'product_uom_id', 'product_uom', 'price_unit',
+                               'tax_ids', 'taxes_id', 'discount', 'date_planned')
+                line_ids = row.get('order_line', [])
+                row['lines'] = [self.record('purchase.order.line', line_id, line_fields) for line_id in line_ids[:20]]
+                row['has_more_lines'] = len(line_ids) > 20
+        if kind == 'stock' and query:
+            exact = [row for row in items if str(row.get('name', '')).casefold() == query.strip().casefold()]
+            if len(exact) == 1 and len(items) <= 20:
+                row = exact[0]
+                move_fields = ('product_id', 'name', 'product_uom_qty', 'quantity', 'product_uom', 'state', 'returned_move_ids')
+                move_ids = row.get('move_ids', [])
+                row['moves'] = [self.record('stock.move', mid, move_fields) for mid in move_ids[:30]]
+                ml_fields = ('product_id', 'quantity', 'qty_done', 'lot_id', 'move_id', 'picked')
+                ml_ids = row.get('move_line_ids', [])
+                row['move_lines'] = [self.record('stock.move.line', mlid, ml_fields) for mlid in ml_ids[:50]]
         return {'status': 'ok', 'kind': kind, 'items': items[:20], 'has_more': len(items) > 20}
 
     def capabilities(self, settings):
@@ -385,6 +426,103 @@ class BusinessService:
                 for move_line in line.get('move_line_ids', []):
                     self.record('stock.move.line', move_line, ['product_id', 'quantity', 'qty_done', 'lot_id', 'location_id', 'location_dest_id', 'picked', 'package_id', 'result_package_id', 'owner_id'])
 
+    def purchase_form_lines(self, order_values, lines):
+        """Fill absent RFQ line fields using Odoo's new-record form computation."""
+        if not isinstance(lines, list) or len(lines) > 100:
+            raise BusinessError('RFQ cần tối đa 100 dòng hàng.')
+        if not all(isinstance(line, dict) for line in lines):
+            raise BusinessError('Dòng mua hàng phải là object.')
+        need_currency = not order_values.get('currency_id')
+        if not need_currency and not any(
+            not {'uom_id', 'price_unit', 'tax_ids', 'date_planned'} <= line.keys()
+            for line in lines
+        ):
+            return {}, lines
+        if not order_values.get('partner_id'):
+            raise BusinessError('Chọn nhà cung cấp trước khi lấy giá và thuế từ Odoo.')
+
+        model = 'purchase.order'
+        line_meta = self.schema('purchase.order.line')
+        uom = 'product_uom_id' if 'product_uom_id' in line_meta else 'product_uom'
+        tax = 'tax_ids' if 'tax_ids' in line_meta else 'taxes_id'
+        fields = {'product_id', 'product_qty', uom, tax, 'price_unit', 'date_planned', 'name', 'discount'}
+        if not (fields - {'name', 'discount'}) <= line_meta.keys():
+            raise Unsupported('Odoo không cung cấp đủ trường để tính dòng RFQ.')
+        order_meta = self.schema(model)
+        header_fields = {'partner_id', 'company_id', 'currency_id', 'date_order',
+                         'picking_type_id', 'fiscal_position_id'}
+        form = {key: value for key, value in order_values.items() if key in header_fields}
+        form['company_id'] = self.company_id
+        form['order_line'] = []
+        products = []
+        for line in lines:
+            product_id = positive_id(line.get('product_id'))
+            product = self.record('product.product', product_id, ['uom_id', 'sale_ok', 'purchase_ok', 'active'])
+            if not product.get('active', True) or product.get('purchase_ok') is False:
+                raise BusinessError('Sản phẩm không sử dụng được cho mua hàng.')
+            products.append(product)
+            quantity = number(line.get('quantity'))
+            if quantity <= 0:
+                raise BusinessError('Số lượng mua phải lớn hơn 0.')
+            values = {'product_id': product_id, 'product_qty': quantity}
+            if 'uom_id' in line:
+                values[uom] = positive_id(line['uom_id'])
+            if 'date_planned' in line:
+                planned, _ = self.values('purchase.order.line', {'date_planned': line['date_planned']}, {'date_planned'})
+                values.update(planned)
+            form['order_line'].append((0, 0, values))
+        spec = {key: {} for key in sorted(header_fields & order_meta.keys())}
+        spec['order_line'] = {'fields': {key: {} for key in sorted(fields & line_meta.keys())}}
+        response = self.ctx.call(model, 'onchange', [[], form, [], spec])
+        if response.get('warning'):
+            raise BusinessError('Odoo báo điều kiện trên RFQ: ' + str(response['warning'].get('message', '')))
+        computed_order = response.get('value', {})
+        commands = computed_order.get('order_line', [])
+        if len(commands) != len(lines):
+            raise Unsupported('Không xác minh được các dòng RFQ do Odoo tính.')
+
+        resolved = []
+        for line, product, command in zip(lines, products, commands, strict=True):
+            if not isinstance(command, tuple | list) or len(command) != 3 or command[0] != 0 or not isinstance(command[2], dict):
+                raise Unsupported('Odoo trả dòng RFQ ở định dạng chưa hỗ trợ.')
+            computed = command[2]
+            relation = computed.get('product_id')
+            computed_product = relation.get('id') if isinstance(relation, dict) else identity(relation)
+            if computed_product != line['product_id']:
+                raise Unsupported('Sản phẩm do Odoo trả về không khớp dòng RFQ.')
+            result = dict(line)
+            if 'uom_id' not in result:
+                relation = computed.get(uom) or product.get('uom_id')
+                result['uom_id'] = positive_id(relation.get('id') if isinstance(relation, dict) else identity(relation))
+            if 'price_unit' not in result:
+                result['price_unit'] = number(computed.get('price_unit'))
+            if 'tax_ids' not in result:
+                tax_ids = []
+                for tax_command in computed.get(tax, []):
+                    if not isinstance(tax_command, tuple | list) or len(tax_command) != 3 or tax_command[0] not in (4, 6):
+                        raise Unsupported('Không xác minh được thuế từ dòng RFQ.')
+                    ids = [tax_command[1]] if tax_command[0] == 4 else tax_command[2]
+                    if not isinstance(ids, list):
+                        raise Unsupported('Không xác minh được danh sách thuế của RFQ.')
+                    tax_ids.extend(positive_id(tax_id) for tax_id in ids)
+                result['tax_ids'] = list(dict.fromkeys(tax_ids))
+            if 'date_planned' not in result:
+                value = computed.get('date_planned')
+                if not isinstance(value, str) or not value:
+                    raise BusinessError('Odoo chưa có ngày nhận dự kiến; hãy nhập ngày nhận.')
+                planned = datetime.fromisoformat(value)
+                result['date_planned'] = (planned.astimezone(UTC) if planned.tzinfo else planned.replace(tzinfo=UTC)).isoformat(' ')
+            if computed.get('name'):
+                result.setdefault('name', computed['name'])
+            if computed.get('discount') is not None:
+                result.setdefault('discount', computed['discount'])
+            resolved.append(result)
+        defaults = {}
+        if need_currency and computed_order.get('currency_id'):
+            relation = computed_order['currency_id']
+            defaults['currency_id'] = positive_id(relation.get('id') if isinstance(relation, dict) else identity(relation))
+        return defaults, resolved
+
     def order_lines(self, definition, lines, parent=None):
         if not isinstance(lines, list) or not lines or len(lines) > 100:
             raise BusinessError('lines cần từ 1 đến 100 dòng.')
@@ -414,21 +552,26 @@ class BusinessService:
                 commands.append((2, line_id, 0))
                 preview.append({'remove_line_id': line_id})
                 continue
-            if item.get('price_confirmed') is not True:
+            if item.get('price_confirmed') is not True and definition.name != 'business.purchases.create':
                 raise BusinessError('Cần chốt đơn giá price_confirmed=true cho từng dòng.')
             product = self.record('product.product', item.get('product_id'), ['uom_id', 'sale_ok', 'purchase_ok', 'active'])
             if not product.get('active', True) or product.get('sale_ok' if sale else 'purchase_ok') is False:
                 raise BusinessError('Sản phẩm không sử dụng được cho nghiệp vụ này.')
             chosen_uom = item.get('uom_id') or identity(product.get('uom_id'))
-            self.record('uom.uom', chosen_uom)
+            unit = self.record('uom.uom', chosen_uom)
             if not isinstance(item.get('tax_ids'), list):
                 raise BusinessError('Cần chọn tax_ids; [] là xác nhận không áp thuế.')
+            tax_names = []
             for tax in item['tax_ids']:
                 tax_row = self.record('account.tax', tax, ['type_tax_use', 'active'])
                 if tax_row.get('type_tax_use') != ('sale' if sale else 'purchase') or tax_row.get('active') is False:
                     raise BusinessError('Thuế không phù hợp nghiệp vụ.')
+                tax_names.append(tax_row.get('name') or str(tax))
+            quantity = number(item.get('quantity'))
+            if not sale and quantity <= 0:
+                raise BusinessError('Số lượng mua phải lớn hơn 0.')
             values = {'product_id': product['id'], 'name': item.get('name') or product.get('display_name') or product.get('name'),
-                      qty: number(item.get('quantity')), 'price_unit': number(item.get('price_unit')),
+                      qty: quantity, 'price_unit': number(item.get('price_unit')),
                       uom: chosen_uom, taxes: [(6, 0, item['tax_ids'])]}
             if sale and 'customer_lead' in meta:
                 if item.get('customer_lead') is not None:
@@ -445,7 +588,10 @@ class BusinessService:
                 planned, _ = self.values(model, {'date_planned': item['date_planned']}, {'date_planned'})
                 values.update(planned)
             commands.append((1, line_id, values) if line_id else (0, 0, values))
-            preview.append(dict(item, product=product.get('display_name')))
+            detail = dict(item, product=product.get('display_name') or product.get('name'))
+            if not sale:
+                detail.update(unit=unit.get('name') or str(chosen_uom), taxes=tax_names)
+            preview.append(detail)
         return commands, preview
 
     def prepare(self, action, payload):
@@ -455,6 +601,10 @@ class BusinessService:
         if not isinstance(payload, dict) or set(payload) - {'company_id', 'target_id', 'values', 'lines', 'options', 'target_kind', '_continuation'}:
             raise BusinessError('Payload chỉ nhận company_id, target_id, values, lines, options, target_kind.')
         payload = copy.deepcopy(payload)
+        if any(not isinstance(payload.get(field, {}), dict) for field in ('values', 'options')):
+            raise BusinessError('values và options phải là object.')
+        if 'lines' in payload and not isinstance(payload['lines'], list):
+            raise BusinessError('lines phải là danh sách dòng hàng.')
         for container in ('values', 'options'):
             if container in payload and not isinstance(payload[container], dict):
                 raise BusinessError(f'{container} phải là object.')
@@ -507,11 +657,17 @@ class BusinessService:
             if definition.kind == 'update' and not values and 'lines' not in payload:
                 missing.append('values')
             if definition.module in ('sales', 'purchases'):
+                purchase_create = action == 'business.purchases.create'
                 if definition.kind == 'create' and 'partner_id' not in values:
                     missing.append('values.partner_id')
                 if definition.kind == 'create' and not payload.get('lines'):
                     missing.append('lines')
-                if payload.get('lines'):
+                if payload.get('lines') and (not purchase_create or set(missing) <= {'currency_id'}):
+                    if purchase_create:
+                        defaults, payload['lines'] = self.purchase_form_lines(values, payload['lines'])
+                        validated, _ = self.values(model, defaults, definition.fields)
+                        values.update(validated)
+                        missing = [name for name in missing if name not in validated]
                     commands, line_preview = self.order_lines(definition, payload['lines'], row)
                     values['order_line'] = commands
                     preview['lines'] = line_preview
@@ -548,12 +704,37 @@ class BusinessService:
                     preview['notice'] += ' Các trường dùng chung sẽ áp dụng cho mọi biến thể của cùng mẫu sản phẩm.'
                     preview['affected_variant_ids'] = template.get('product_variant_ids', [])
             preview['changes'] = [{'field': name, 'label': self.schema(model).get(name, {}).get('string', name), 'before': row.get(name) if row else None, 'after': value} for name, value in values.items() if name != 'order_line']
+            if definition.module == 'purchases':
+                labels = {
+                    'partner_id': 'Nhà cung cấp',
+                    'partner_ref': 'Mã tham chiếu NCC',
+                    'currency_id': 'Tiền tệ',
+                    'payment_term_id': 'Điều khoản thanh toán',
+                    'date_order': 'Hạn đặt hàng',
+                    'date_planned': 'Ngày nhận dự kiến',
+                    'picking_type_id': 'Giao hàng đến',
+                    'user_id': 'Người mua',
+                    'notes': 'Ghi chú',
+                    'company_id': 'Công ty',
+                }
+                for change in preview['changes']:
+                    field = change['field']
+                    if field not in labels:
+                        continue
+                    change['label'] = labels[field]
+                    relation = self.schema(model)[field].get('relation')
+                    if relation:
+                        source = self.snapshot.get((relation, change['after']), {}).get('values', {})
+                        change['after'] = source.get('display_name') or source.get('name') or change['after']
         elif definition.kind in ('archive', 'restore'):
             if 'active' not in self.schema(model):
                 raise Unsupported('Model không hỗ trợ lưu trữ.')
             values = {'active': definition.kind == 'restore'}
             preview['changes'] = [{'field': 'active', 'before': row.get('active') if row else None, 'after': values['active']}]
         elif definition.kind == 'method' and row:
+            if action in {'business.purchases.confirm', 'business.purchases.approve'}:
+                preview['target'] = self.readback(model, row['id'])
+                preview['notice'] = 'Odoo sẽ áp dụng quy trình duyệt và tạo phiếu nhập kho nếu cấu hình đơn mua yêu cầu.'
             if action == 'business.sales.confirm':
                 opts = payload.get('options', {})
                 if set(opts) - {'customer_accepted'}:

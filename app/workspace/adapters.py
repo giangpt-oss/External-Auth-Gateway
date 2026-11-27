@@ -1,7 +1,7 @@
 """Schema Adapter and Cursor Paging between MCP and REST protocols for Google Workspace."""
 import base64
 import json
-from typing import Any, Optional, Tuple
+from typing import Any
 
 
 class ProtocolCursorMismatchError(ValueError):
@@ -16,9 +16,9 @@ def encode_cursor(protocol: str, page_token: str) -> str:
     return base64.urlsafe_b64encode(raw).decode("utf-8")
 
 
-def decode_cursor(cursor: str, expected_protocol: Optional[str] = None) -> Tuple[str, str]:
+def decode_cursor(cursor: str, expected_protocol: str | None = None) -> tuple[str, str]:
     """Decode cursor into (protocol, page_token).
-    
+
     If expected_protocol is given and does not match the cursor's protocol,
     raises ProtocolCursorMismatchError.
     """
@@ -46,7 +46,7 @@ def normalize_workspace_result(
     raw_data: Any,
 ) -> dict[str, Any]:
     """Normalize raw REST or MCP output into a unified dictionary structure.
-    
+
     Returns:
         {
             "items": list[dict],
@@ -64,7 +64,7 @@ def normalize_workspace_result(
         }
 
     items: list[dict[str, Any]] = []
-    next_page_token: Optional[str] = None
+    next_page_token: str | None = None
     metadata: dict[str, Any] = {}
 
     # Extract next page token

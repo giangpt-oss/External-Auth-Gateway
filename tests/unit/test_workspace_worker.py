@@ -1,8 +1,8 @@
-import asyncio
-from datetime import UTC, datetime, timedelta
 import json
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -36,7 +36,7 @@ def db_session():
 
 def test_worker_claim_and_renew_job(db_session):
     session, session_factory = db_session
-    
+
     # 1. Insert a queued job
     now = datetime.now(UTC)
     job = WorkspaceJob(
@@ -51,14 +51,14 @@ def test_worker_claim_and_renew_job(db_session):
     )
     session.add(job)
     session.commit()
-    
+
     settings = MagicMock()
     settings.ENCRYPTION_KEY = None
     settings.AI_AGENT_BASE_URL = "http://localhost:8000"
     settings.GATEWAY_TO_AGENT_SECRET = "gw_to_agent_secret"
-    
+
     worker = WorkspaceWorker(settings=settings, session_factory=session_factory, worker_id="worker-test-1")
-    
+
     # 2. Claim job
     with session_factory() as db:
         claimed = worker.claim_next_job(db)
@@ -70,7 +70,7 @@ def test_worker_claim_and_renew_job(db_session):
         if lease_exp.tzinfo is None:
             lease_exp = lease_exp.replace(tzinfo=UTC)
         assert lease_exp > now
-        
+
     # 3. Renew lease
     with session_factory() as db:
         renewed = worker.renew_lease(db, job_id="job_claim_test")
@@ -93,28 +93,28 @@ async def test_worker_complete_job_and_send_callback(db_session):
     )
     session.add(job)
     session.commit()
-    
+
     settings = MagicMock()
     settings.ENCRYPTION_KEY = None
     settings.AI_AGENT_BASE_URL = "http://localhost:8000"
     settings.GATEWAY_TO_AGENT_SECRET = "gw_to_agent_secret"
-    
+
     worker = WorkspaceWorker(settings=settings, session_factory=session_factory, worker_id="worker-test-1")
-    
+
     # Mock executor & callback
     worker.execute_job_payload = AsyncMock(return_value={"status": "completed", "result": {"items": [{"id": "ev1", "summary": "Test Meeting"}]}})
     worker.send_callback = AsyncMock(return_value=True)
-    
+
     # Run single job processing
     await worker.process_one_cycle()
-    
+
     # Verify status changed to completed
     with session_factory() as db:
         updated = db.query(WorkspaceJob).filter_by(job_id="job_exec_test").first()
         assert updated.status == WorkspaceJobStatus.COMPLETED.value
         assert updated.completed_at is not None
         assert "Test Meeting" in updated.result_encrypted
-        
+
     worker.send_callback.assert_awaited_once()
 
 

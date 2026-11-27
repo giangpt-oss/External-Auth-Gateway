@@ -15,21 +15,21 @@ Validates:
 """
 
 from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.google.account_resolver import GoogleAccountResolver
-from app.google.oauth import GoogleOAuthService, GoogleOAuthError, DifferentGoogleAccountError
+from app.google.oauth import GoogleOAuthError, GoogleOAuthService
 from app.models import (
     Base,
     GoogleAccountSelection,
     GoogleConnection,
     User,
-    WorkspaceActivity,
 )
 from app.security import encrypt_secret
-from app.workspace.activity_tracker import WorkspaceActivityTracker, ActivityType
+from app.workspace.activity_tracker import ActivityType, WorkspaceActivityTracker
 from app.workspace.models import WorkspaceJob
 from app.workspace.selection_manager import SelectionManager, SwitchLockError
 
@@ -351,6 +351,7 @@ def test_api_accounts_and_switch_lock_endpoints(tmp_path):
     - POST /connections/google/accounts/{id}/disconnect
     """
     from starlette.testclient import TestClient
+
     from app.config import Settings
     from app.main import create_app
     from app.models import Session as UserSession

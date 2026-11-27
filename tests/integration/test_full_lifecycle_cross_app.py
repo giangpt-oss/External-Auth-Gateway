@@ -36,7 +36,7 @@ class MockTelegramHandler(BaseHTTPRequestHandler):
         except Exception:
             payload = {"raw": body}
 
-        if "text" in payload:
+        if self.path.endswith("/sendMessage") and "text" in payload and "Đã chờ " not in payload["text"]:
             MockTelegramHandler.received_messages.append(payload)
 
         self.send_response(200)
@@ -123,10 +123,9 @@ def full_lifecycle_env(tmp_path_factory, mock_tg_server):
         db.commit()
 
     gw_dir = Path(__file__).resolve().parents[2]
-    agent_dir_cand = gw_dir.parents[1] / "Module AI - Agent"
-    if not agent_dir_cand.exists():
-        agent_dir_cand = Path(r"D:\ODOO\Module AI - Agent")
-    agent_dir = agent_dir_cand.resolve()
+    agent_dir = Path(os.environ.get("AI_AGENT_REPO", str(gw_dir.parent / "Module AI - Agent"))).resolve()
+    if not agent_dir.is_dir():
+        pytest.skip("Requires the sibling Agent repo or AI_AGENT_REPO")
 
     agent_py = agent_dir / ".venv" / "Scripts" / "python.exe"
     agent_python = str(agent_py) if agent_py.exists() else sys.executable
@@ -198,7 +197,7 @@ def full_lifecycle_env(tmp_path_factory, mock_tg_server):
     )
 
     # 4. Wait for both servers to be ready
-    def wait_ready(url, timeout=25):
+    def wait_ready(url, timeout=90):
         start = time.time()
         while time.time() - start < timeout:
             try:

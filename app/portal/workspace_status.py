@@ -2,7 +2,6 @@
 
 from app.models import GoogleConnection
 
-
 _SCOPE_MARKERS = {
     "gmail": ("gmail", "mail.google.com"),
     "calendar": ("calendar",),

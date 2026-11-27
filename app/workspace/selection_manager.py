@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -45,9 +44,9 @@ class SelectionManager:
     def check_admission(
         db: Session,
         user_id: int,
-        account_id: Optional[int] = None,
-        expected_version: Optional[int] = None,
-    ) -> tuple[bool, Optional[str], Optional[GoogleAccountSelection]]:
+        account_id: int | None = None,
+        expected_version: int | None = None,
+    ) -> tuple[bool, str | None, GoogleAccountSelection | None]:
         """Verify whether new Workspace tasks or syncs can be admitted for this user.
 
         Returns:

@@ -1,3 +1,4 @@
+
 """Test separation of link_version and connection_version for GoogleConnection.
 
 Proves:
@@ -8,19 +9,19 @@ Proves:
 5. Alembic migration d1e2f3a4b5c6 cleanly adds link_version and downgrades back to c7d8e9f0a1b2.
 """
 
-from datetime import UTC, datetime, timedelta
 import os
-import tempfile
+from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
+
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
-from app.google.oauth import GoogleOAuthService, GoogleAuthRevokedError
+from alembic import command
+from alembic.config import Config
+from app.google.oauth import GoogleAuthRevokedError, GoogleOAuthService
 from app.models import Base, GoogleConnection, LinkToken, User
 from app.security import encrypt_secret
-from app.workspace.models import OAuthRefreshLease
 
 FERNET_KEY = "_3pDgavXi1u3T76np_zSNJQcNS87hKW7fEdQXjlu3Ew="
 
@@ -105,7 +106,7 @@ def test_routine_token_refresh_preserves_link_version(separation_env):
         assert conn.link_version == 1
 
 
-from unittest.mock import MagicMock, patch
+
 
 def test_relink_increments_link_version(separation_env):
     """Case 2: Relinking Google account increments link_version (invalidating old Drive index)."""

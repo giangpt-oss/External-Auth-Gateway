@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any
+
 import httpx
 
-ENDPOINTS: Dict[str, str] = {
+ENDPOINTS: dict[str, str] = {
     service: f"https://{service}mcp.googleapis.com/mcp/v1"
     for service in ("gmail", "calendar", "drive", "docs", "sheets", "slides")
 }
@@ -15,7 +16,7 @@ ENDPOINTS: Dict[str, str] = {
 
 class MCPError(Exception):
     """Raised when an MCP request fails or returns an error response."""
-    def __init__(self, message: str = "MCP request failed", status_code: Optional[int] = None, data: Any = None):
+    def __init__(self, message: str = "MCP request failed", status_code: int | None = None, data: Any = None):
         super().__init__(message)
         self.status_code = status_code
         self.data = data
@@ -26,8 +27,8 @@ class CircuitBreaker:
     def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 30.0):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
-        self._failures: Dict[str, int] = {}
-        self._tripped_until: Dict[str, float] = {}
+        self._failures: dict[str, int] = {}
+        self._tripped_until: dict[str, float] = {}
 
     def record_failure(self, service: str) -> None:
         self._failures[service] = self._failures.get(service, 0) + 1
@@ -51,16 +52,16 @@ class CircuitBreaker:
 
 class MCPStreamableClient:
     """Streamable HTTP client for Google Workspace MCP services."""
-    def __init__(self, service: str, base_url: Optional[str] = None):
+    def __init__(self, service: str, base_url: str | None = None):
         self.service = service
         self.base_url = base_url or ENDPOINTS.get(service, f"https://{service}mcp.googleapis.com/mcp/v1")
-        self.session_id: Optional[str] = None
+        self.session_id: str | None = None
         self._http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=5.0),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
 
-    async def initialize(self, token: str, user_id: int, connection_version: int) -> Dict[str, Any]:
+    async def initialize(self, token: str, user_id: int, connection_version: int) -> dict[str, Any]:
         """Perform MCP lifecycle initialize handshake and capture Mcp-Session-Id."""
         headers = {
             "Authorization": f"Bearer {token}",
@@ -92,7 +93,7 @@ class MCPStreamableClient:
         )
         if resp.status_code >= 400:
             raise MCPError(f"Initialize failed with status {resp.status_code}", status_code=resp.status_code)
-        
+
         # Save Mcp-Session-Id if returned by server
         sess_hdr = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
         if sess_hdr:
@@ -101,7 +102,7 @@ class MCPStreamableClient:
         data = resp.json()
         if "error" in data:
             raise MCPError(f"MCP Initialize Error: {data['error']}", data=data["error"])
-        
+
         result = data.get("result", {})
         return result.get("serverInfo", result)
 
@@ -110,7 +111,7 @@ class MCPStreamableClient:
         token: str,
         user_id: int,
         connection_version: int,
-    ) -> list[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """List available tools exposed by this MCP server."""
         headers = {
             "Authorization": f"Bearer {token}",
@@ -133,11 +134,11 @@ class MCPStreamableClient:
         )
         if resp.status_code >= 400:
             raise MCPError(f"tools/list failed with status {resp.status_code}", status_code=resp.status_code)
-        
+
         data = resp.json()
         if "error" in data:
             raise MCPError(f"MCP tools/list Error: {data['error']}", data=data["error"])
-        
+
         result = data.get("result", {})
         return result.get("tools", [])
 
@@ -147,8 +148,8 @@ class MCPStreamableClient:
         user_id: int,
         connection_version: int,
         name: str,
-        arguments: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
         """Call an MCP tool with JSON-RPC 2.0."""
         headers = {
             "Authorization": f"Bearer {token}",
@@ -213,13 +214,13 @@ class MCPSyncClient:
     def __init__(
         self,
         service: str,
-        base_url: Optional[str] = None,
-        http_client: Optional[httpx.Client] = None,
-        transport: Optional[Any] = None,
+        base_url: str | None = None,
+        http_client: httpx.Client | None = None,
+        transport: Any | None = None,
     ):
         self.service = service
         self.base_url = base_url or ENDPOINTS.get(service, f"https://{service}mcp.googleapis.com/mcp/v1")
-        self.session_id: Optional[str] = None
+        self.session_id: str | None = None
         self._shared_client = http_client or httpx.Client(
             http2=True,
             timeout=httpx.Timeout(9.0, connect=3.0, pool=2.0),
@@ -308,7 +309,7 @@ class MCPSyncClient:
                 self.protocol_version = None
                 raise
 
-    def initialize(self, token: str, user_id: int, connection_version: int = 1) -> Dict[str, Any]:
+    def initialize(self, token: str, user_id: int, connection_version: int = 1) -> dict[str, Any]:
         """Perform MCP initialize handshake and capture Mcp-Session-Id."""
         headers = {
             "Authorization": f"Bearer {token}",
@@ -342,7 +343,7 @@ class MCPSyncClient:
         result = data.get("result", {})
         return result.get("serverInfo", result)
 
-    def list_tools(self, token: str, user_id: int, connection_version: int = 1) -> list[Dict[str, Any]]:
+    def list_tools(self, token: str, user_id: int, connection_version: int = 1) -> list[dict[str, Any]]:
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -367,10 +368,10 @@ class MCPSyncClient:
         self,
         token: str,
         name: str,
-        arguments: Dict[str, Any],
-        user_id: Optional[int] = None,
+        arguments: dict[str, Any],
+        user_id: int | None = None,
         connection_version: int = 1,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         from jsonschema import ValidationError, validate
 
         self._ensure_ready(token)

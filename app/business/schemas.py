@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,6 +16,15 @@ class LookupRequest(TelegramScope):
     kind: str
     query: str = Field(default='', max_length=200)
     company_id: int | None = Field(default=None, gt=0)
+
+
+class PurchaseApprovalRequest(TelegramScope):
+    model_config = ConfigDict(extra='forbid')
+    token: str = Field(pattern=r'^[0-9a-f]{24}$')
+
+
+class PurchaseApprovalDecision(PurchaseApprovalRequest):
+    decision: Literal['approve', 'reject']
 
 
 class PreparedAction(BaseModel):

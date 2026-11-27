@@ -4,7 +4,6 @@ Provides unified resolution of active, pinned, and owned Google connections
 across REST, MCP, Background Scheduler, and Worker pipelines.
 """
 
-from typing import Optional
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -14,7 +13,7 @@ from app.models import GoogleAccountSelection, GoogleConnection, User
 
 class GoogleAccountResolver:
     @staticmethod
-    def get_selection(db: Session, user_id: int, for_update: bool = False) -> Optional[GoogleAccountSelection]:
+    def get_selection(db: Session, user_id: int, for_update: bool = False) -> GoogleAccountSelection | None:
         """Fetch the GoogleAccountSelection row for the user, optionally with row-level lock."""
         query = db.query(GoogleAccountSelection).filter_by(user_id=user_id)
         if for_update:
@@ -32,11 +31,11 @@ class GoogleAccountResolver:
         return query.first()
 
     @staticmethod
-    def _first_connection(db: Session, user_id: int) -> Optional[GoogleConnection]:
+    def _first_connection(db: Session, user_id: int) -> GoogleConnection | None:
         return db.query(GoogleConnection).filter_by(user_id=user_id).order_by(GoogleConnection.id).first()
 
     @classmethod
-    def get_active_account(cls, db: Session, user_id: int) -> Optional[GoogleConnection]:
+    def get_active_account(cls, db: Session, user_id: int) -> GoogleConnection | None:
         """Read the selection, with a compatibility fallback for unmigrated users."""
         connection, _ = cls.get_active_with_selection(db, user_id)
         return connection
@@ -44,7 +43,7 @@ class GoogleAccountResolver:
     @classmethod
     def get_active_with_selection(
         cls, db: Session, user_id: int,
-    ) -> tuple[Optional[GoogleConnection], Optional[GoogleAccountSelection]]:
+    ) -> tuple[GoogleConnection | None, GoogleAccountSelection | None]:
         selection = cls.get_selection(db, user_id)
         if selection is None:
             return cls._first_connection(db, user_id), None
@@ -53,7 +52,7 @@ class GoogleAccountResolver:
         return cls.get_account(db, user_id, selection.active_account_id), selection
 
     @classmethod
-    def lock_selection(cls, db: Session, user_id: int) -> Optional[GoogleAccountSelection]:
+    def lock_selection(cls, db: Session, user_id: int) -> GoogleAccountSelection | None:
         """Lock the selection in the caller's transaction, initializing legacy users once."""
         selection = cls.get_selection(db, user_id, for_update=True)
         if selection is not None:
@@ -74,7 +73,7 @@ class GoogleAccountResolver:
         return selection
 
     @staticmethod
-    def get_account(db: Session, user_id: int, account_id: int) -> Optional[GoogleConnection]:
+    def get_account(db: Session, user_id: int, account_id: int) -> GoogleConnection | None:
         """Fetch a specific GoogleConnection and strictly verify ownership by user_id."""
         return db.query(GoogleConnection).filter_by(
             id=account_id,
@@ -85,8 +84,8 @@ class GoogleAccountResolver:
     def resolve_for_task(
         db: Session,
         user_id: int,
-        pinned_account_id: Optional[int] = None,
-    ) -> Optional[GoogleConnection]:
+        pinned_account_id: int | None = None,
+    ) -> GoogleConnection | None:
         """Resolve the GoogleConnection for a task:
 
         - If pinned_account_id is provided, resolve and verify ownership.

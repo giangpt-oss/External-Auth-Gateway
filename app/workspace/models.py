@@ -46,30 +46,30 @@ class WorkspaceJob(Base):
     selection_version = Column(Integer, nullable=True, default=1)
     request_id = Column(String(128), nullable=False, index=True)
     operation_id = Column(String(64), nullable=True, index=True)
-    
+
     action = Column(String(32), nullable=False, default="read")  # read, prepare, execute
     service = Column(String(32), nullable=False)  # gmail, calendar, drive, docs, sheets, slides
     operation = Column(String(128), nullable=False)
     protocol = Column(String(16), nullable=False, default="auto")  # auto, rest, mcp
     is_write = Column(Boolean, nullable=False, default=False)
-    
+
     status = Column(String(32), nullable=False, default=WorkspaceJobStatus.QUEUED.value, index=True)
     phase = Column(String(64), nullable=True)
-    
+
     payload_encrypted = Column(Text, nullable=False)
     result_encrypted = Column(Text, nullable=True)
-    
+
     error_code = Column(String(64), nullable=True)
     error_message = Column(Text, nullable=True)
-    
+
     worker_id = Column(String(64), nullable=True)
     lease_expires_at = Column(DateTime, nullable=True, index=True)
     retry_count = Column(Integer, nullable=False, default=0)
     deadline_at = Column(DateTime, nullable=False, index=True)
-    
+
     telegram_chat_id = Column(BigInteger, nullable=True)
     telegram_user_id = Column(BigInteger, nullable=True)
-    
+
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
     completed_at = Column(DateTime, nullable=True)
@@ -89,11 +89,11 @@ class WorkspaceIdempotencyRecord(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     operation_id = Column(String(64), unique=True, nullable=False, index=True)
     payload_hash = Column(String(64), nullable=False, index=True)
-    
+
     status = Column(String(32), nullable=False, default="in_progress")
     resource_id = Column(String(128), nullable=True)
     response_json = Column(Text, nullable=True)
-    
+
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
@@ -113,7 +113,7 @@ class OAuthRefreshLease(Base):
     lease_holder = Column(String(64), nullable=True)
     lease_expires_at = Column(DateTime, nullable=True, index=True)
     connection_version = Column(Integer, nullable=False, default=1)
-    
+
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
 

@@ -664,20 +664,17 @@ class TelegramAIWorker:
         if reply_to_text:
             req_payload["reply_to_text"] = reply_to_text
 
-        # Send typing action to Telegram
-        try:
-            self.telegram_client.send_chat_action(chat_id, "typing")
-        except Exception as e:
-            _logger.debug("Failed to send typing chat action: %s", e)
-
         t_ai_start = time.time()
         try:
+            from app.telegram.progress import TurnProgressTracker
+
             headers = {
                 "Authorization": f"Bearer {self.settings.GATEWAY_TO_AGENT_SECRET}",
                 "Content-Type": "application/json",
             }
-            resp = httpx.post(ai_url, json=req_payload, headers=headers,
-                              timeout=130.0)
+            with TurnProgressTracker(self.telegram_client, chat_id, text_content):
+                resp = httpx.post(ai_url, json=req_payload, headers=headers,
+                                  timeout=130.0)
             t_ai = time.time() - t_ai_start
             _logger.info("TIMING_AI: request_id=%s duration=%.3fs status=%s", request_id, t_ai, resp.status_code)
 
@@ -918,7 +915,7 @@ class TelegramAIWorker:
             chunk = all_chunks[idx]
 
             artifact = None
-            if isinstance(chunk, dict) and chunk.get("type") != "confirmation":
+            if isinstance(chunk, dict) and chunk.get("type") not in ("confirmation", "options"):
                 try:
                     if chunk.get("type") != "document" or not expected_binding_id:
                         raise ValueError("Invalid document delivery chunk")

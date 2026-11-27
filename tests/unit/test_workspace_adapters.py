@@ -1,17 +1,17 @@
 import pytest
 
 from app.workspace.adapters import (
-    normalize_workspace_result,
-    encode_cursor,
-    decode_cursor,
     ProtocolCursorMismatchError,
+    decode_cursor,
+    encode_cursor,
+    normalize_workspace_result,
 )
 
 
 def test_cursor_encode_decode():
     cursor = encode_cursor(protocol="rest", page_token="token_abc_123")
     assert isinstance(cursor, str)
-    
+
     proto, token = decode_cursor(cursor)
     assert proto == "rest"
     assert token == "token_abc_123"
@@ -20,7 +20,7 @@ def test_cursor_encode_decode():
 def test_cursor_protocol_mismatch_detection():
     # If a cursor is created with MCP, decoding it with expected protocol 'rest' raises mismatch error
     cursor = encode_cursor(protocol="mcp", page_token="mcp_cursor_xyz")
-    
+
     with pytest.raises(ProtocolCursorMismatchError):
         decode_cursor(cursor, expected_protocol="rest")
 
@@ -44,14 +44,14 @@ def test_normalize_gmail_messages_rest_and_mcp():
         ],
         "nextPageToken": "page_tok_1",
     }
-    
+
     normalized_rest = normalize_workspace_result(
         protocol="rest",
         service="gmail",
         operation="messages.list",
         raw_data=raw_rest,
     )
-    
+
     assert len(normalized_rest["items"]) == 1
     item = normalized_rest["items"][0]
     assert item["id"] == "msg_001"
@@ -78,14 +78,14 @@ def test_normalize_calendar_events_rest_and_mcp():
         ],
         "nextPageToken": "cal_page_2",
     }
-    
+
     normalized = normalize_workspace_result(
         protocol="rest",
         service="calendar",
         operation="events.list",
         raw_data=raw_rest,
     )
-    
+
     assert len(normalized["items"]) == 1
     evt = normalized["items"][0]
     assert evt["id"] == "evt_123"
@@ -107,14 +107,14 @@ def test_normalize_drive_files_rest_and_mcp():
         ],
         "nextPageToken": "drive_page_next",
     }
-    
+
     normalized = normalize_workspace_result(
         protocol="rest",
         service="drive",
         operation="files.list",
         raw_data=raw_rest,
     )
-    
+
     assert len(normalized["items"]) == 1
     f = normalized["items"][0]
     assert f["id"] == "file_999"

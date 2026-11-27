@@ -5,7 +5,6 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
-from app.models import GoogleConnection, User
 from app.workspace.drive_storage import DriveLink, lock_drive_link
 from app.workspace.models import DriveFileMetadata, DrivePermissionState, DriveSyncCheckpoint
 from app.workspace.service import WorkspaceError

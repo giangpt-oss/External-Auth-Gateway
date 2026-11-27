@@ -1,77 +1,93 @@
-# Bảng Kiểm Chứng Tiêu Chuẩn Nghiệm Thu — External Auth Gateway
+# Kiểm tra trước khi bàn giao
 
-Tài liệu đối chiếu và đánh giá tiêu chí hoàn thành theo đúng kế hoạch triển khai kỹ thuật.
+Tài liệu là danh sách kiểm tra để chạy trên phiên bản code và môi trường cụ thể. Ghi kết quả thực tế sau mỗi lần chạy, kèm ngày, phiên bản code và bằng chứng.
 
-> **Trạng thái hiện tại (2026-10-23):** Bộ kiểm thử tự động đạt, nhưng kiểm tra bổ sung đã phát hiện các khoảng trống chưa được test liên quan đến phân trang/xóa lịch, vòng đời rate limit, CSRF và thao tác xử lý xung đột. Các mục tương ứng bên dưới được đánh dấu **Chưa đạt**. Chưa triển khai với dữ liệu lịch thật cho đến khi các mục này được sửa và kiểm chứng lại.
+## 1. Chuẩn bị
 
----
+Ghi lại database sử dụng, tenant Odoo, tài khoản thử, cờ chức năng đang bật và cách chạy dịch vụ. Các ca ghi dữ liệu cần dùng môi trường và dữ liệu đã được cho phép thử nghiệm.
 
-## 1. Tóm tắt kết quả kiểm tra tự động
+## 2. Kiểm tra tự động
 
-- **Thời điểm kiểm tra gần nhất**: 2026-10-23
-- **Công cụ kiểm tra**: Pytest 8.3, Ruff (Linter & Formatter), HTTPX Mock (`respx`)
-- **Kết quả lệnh**:
-  - `python -m ruff check .`: **0 cảnh báo / 0 lỗi**
-  - `python -m ruff format --check .`: **Đạt chuẩn 100%**
-  - `python -m pytest -q`: **53/53 tests passed (100%)**
+Chạy tại thư mục gốc Gateway.
 
----
+```powershell
+.\.venv\Scripts\python.exe -m ruff check app tests
+./scripts/dev.ps1 test unit
+./scripts/dev.ps1 test integration
+./scripts/dev.ps1 test contract
+```
 
-## 2. Bảng đối chiếu từng tiêu chí nghiệm thu
+Script dev.ps1 tạo môi trường chạy test riêng. Xem nội dung script khi cần kiểm tra danh sách file được chọn hoặc loại trừ.
 
-| STT | Hạng mục / Tiêu chí | Trạng thái | Bằng chứng kiểm thử & Ghi chú |
-|:---:|---|:---:|---|
-| **1** | **Khung ứng dụng & Bảo mật** | | |
-| 1.1 | Chạy 1 container FastAPI, SQLite WAL, busy_timeout | **Đạt** | `test_db_persistence_and_wal`, `test_db_foreign_keys_enforced` |
-| 1.2 | Mã hóa AES-256 Fernet cho credential và token | **Đạt** | `test_encryption_roundtrip`, `test_decryption_with_wrong_key` |
-| 1.3 | Hash SHA-256 token tạm, session, CSRF | **Đạt** | `test_hash_token_sha256` |
-| 1.4 | Từ chối khởi động production nếu thiếu khóa | **Đạt** | `test_config_production_requires_fernet_key`, `test_config_production_requires_https_urls` |
-| 1.5 | Endpoint `/healthz` kiểm tra DB | **Đạt** | `test_healthz_endpoint` |
-| **2** | **Xác thực Odoo & Phân quyền nhân viên** | | |
-| 2.1 | Hỗ trợ 2 hình thức: Password và API Key cá nhân | **Đạt** | `test_odoo_client_authenticate_success`, `test_login_success_active_internal_user` |
-| 2.2 | Chỉ cho phép `active=True, share=False` | **Đạt** | `test_login_rejects_portal_user`, `test_login_rejects_inactive_user` |
-| 2.3 | Giới hạn 5 lần đăng nhập sai / 15 phút | **Chưa đạt** | Service rate limit được tạo lại theo từng HTTP request; 7 lần thử sai liên tiếp vẫn trả `401`, không trả `429`. |
-| 2.4 | Script `scripts/check_odoo.py` an toàn qua prompt | **Đạt** | Triển khai trong `scripts/check_odoo.py`, ẩn ký tự nhập |
-| **3** | **Google Workspace OAuth** | | |
-| 3.1 | PKCE S256, state, nonce ngẫu nhiên một lần | **Đạt** | `test_begin_oauth_generates_url_and_link_token`, `test_callback_invalid_or_used_state` |
-| 3.2 | Xác minh ID Token và kiểm tra claim `hd` miền công ty | **Đạt** | `test_callback_success_stores_connection`, `test_callback_rejects_unauthorized_domain` |
-| 3.3 | Refresh token khóa theo user, xử lý `invalid_grant` | **Đạt** | `test_refresh_token_success_and_invalid_grant` |
-| 3.4 | Chặn kết nối đè tài khoản Google khác subject | **Đạt** | `test_callback_reconnect_different_sub_rejected` |
-| **4** | **Telegram Bot & Ghép nối an toàn** | | |
-| 4.1 | Token một lần, QR code nội bộ không gọi dịch vụ ngoài | **Đạt** | `test_telegram_issue_link_and_qr` |
-| 4.2 | Ghép nối private chat, chống chiếm đoạt danh tính | **Đạt** | `test_telegram_pairing_success`, `test_telegram_rejects_already_linked_to_different_user` |
-| 4.3 | Webhook bắt buộc secret token, lưu DB trước khi ACK | **Đạt** | `test_telegram_webhook_secret_and_idempotency` |
-| 4.4 | Xử lý sự kiện bot bị block (403) | **Đạt** | Xử lý `BotBlockedError` trong `ReminderService.deliver_due` |
-| **5** | **Tra cứu CRM qua Telegram** | | |
-| 5.1 | Lệnh `/crm`, `/crm từ_khóa`, `/crm@bot` | **Đạt** | `test_crm_without_keyword`, `test_crm_with_keyword_and_bot_suffix` |
-| 5.2 | Phân quyền: chỉ đọc lead của chính mình (`user_id=UID`) | **Đạt** | Kiểm tra domain Odoo XML-RPC trong `test_crm_without_keyword` |
-| 5.3 | Escape HTML chống injection, gắn link trực tiếp | **Đạt** | `html.escape` và định dạng link trong `test_crm_without_keyword` |
-| 5.4 | Rate limit 10 lần/phút/user | **Chưa đạt** | Cùng vấn đề vòng đời service; cần kiểm thử qua nhiều HTTP request/webhook thực tế. |
-| **6** | **Đồng bộ Lịch Google & Odoo** | | |
-| 6.1 | Chuẩn hóa 2 chiều, loại bỏ recurrence và lịch mời | **Đạt** | `test_google_timed_event_normalization`, `test_event_eligibility_checks` |
-| 6.2 | Chuyển đổi all-day inclusive (Odoo) & exclusive (Google) | **Đạt** | `test_all_day_event_inclusive_exclusive_conversion` |
-| 6.3 | Fingerprint SHA-256 đối soát baseline | **Đạt** | `test_fingerprint_generation` |
-| 6.4 | Deterministic Google Event ID, chống lặp create | **Đạt** | `test_sync_creates_google_event_from_odoo` |
-| 6.5 | Phát hiện và giải quyết Conflict | **Chưa đạt** | Route Portal có thể chỉ đổi trạng thái sang `synced` mà không cập nhật lịch phía còn lại. |
-| **7** | **Nhắc họp qua Telegram (Trước 15 phút)** | | |
-| 7.1 | Quét sự kiện trong khoảng [now, now + 15m] | **Đạt** | `test_reminder_enqueued_in_15_min_window` |
-| 7.2 | Bỏ qua sự kiện cả ngày hoặc sự kiện đã quá giờ | **Đạt** | `test_reminder_ignores_allday_and_past_events` |
-| 7.3 | Outbox dedup_key chống gửi lặp | **Đạt** | `test_reminder_enqueued_in_15_min_window` |
-| 7.4 | Gửi tin thành công chuyển trạng thái `sent` | **Đạt** | `test_outbox_deliver_due` |
-| **8** | **Cổng Portal Người Dùng (Giao diện web)** | | |
-| 8.1 | Giao diện tiếng Việt, responsive 360px+ và desktop | **Đạt** | `test_portal_login_page_renders_form`, CSS Grid/Flexbox |
-| 8.2 | Bảo vệ CSRF, session cookie HttpOnly Lax | **Chưa đạt** | Cookie có `HttpOnly`/`SameSite=Lax`, nhưng một số POST thay đổi trạng thái chưa xác minh CSRF; login vẫn nhận request không có token. |
-| 8.3 | Quản lý Google, Telegram, Calendar sync, Conflict | **Chưa đạt** | Bật/tạm dừng đồng bộ chưa thay đổi trạng thái; đối soát ghi sai trường và xử lý conflict chưa gọi service thực tế. |
-| **9** | **Docker, Vận hành & Triển khai thực tế** | | |
-| 9.1 | Dockerfile slim, non-root user `appuser`, 1 worker | **Đạt** | Dockerfile định nghĩa đầy đủ chỉ dẫn bảo mật |
-| 9.2 | Compose có Gateway + Cloudflare Tunnel | **Chưa kiểm chứng lại** | Docker Engine hiện không kết nối; cần build và chạy smoke test khi Docker hoạt động. |
-| 9.3 | Backup script bằng SQLite Online Backup API | **Đạt** | `scripts/backup.py` dùng `sqlite3.Connection.backup` |
-| 9.4 | **Kiểm chứng trực tiếp trên Tenant Odoo thật** | **Chưa kiểm chứng** | Chưa có thông tin tenant URL và API Key thật của khách hàng. Agent cung cấp sẵn script `scripts/check_odoo.py` để chạy xác nhận ngay khi có credential. |
+Các bài thử cần repo Agent nằm cạnh Gateway chạy riêng.
 
----
+Nếu repo Agent nằm ở vị trí khác, đặt biến môi trường AI_AGENT_REPO thành đường dẫn repo đó trước khi chạy.
 
-## 3. Các giới hạn kỹ thuật được ghi nhận rõ ràng
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_full_lifecycle_cross_app.py tests/integration/test_live_cross_app_e2e.py -v
+```
 
-1. **Rủi ro xóa nhầm lịch**: Luồng hiện tại giới hạn 200 sự kiện Odoo và chỉ đọc một trang Google. Một sự kiện không xuất hiện trong tập kết quả có thể bị hiểu nhầm là đã xóa; phải bổ sung phân trang và xác minh riêng trước khi cho phép xóa phía còn lại.
-2. **Odoo Create Timeout (Ambiguous Intent)**: Nếu request tạo lịch sang Odoo bị đứt mạng giữa chừng, Gateway không tự động tạo lại để tránh nhân đôi lịch, mà chuyển sang trạng thái `ambiguous` để người dùng đối soát trên Portal.
-3. **Telegram Outbox Delivery Timeout**: Khi gửi tin sang Telegram gặp timeout mạng lúc chưa nhận HTTP status, tin nhắn chuyển sang `delivery_unknown` thay vì retry mù quáng để tránh spam nhân viên.
+Các bài PostgreSQL và test peer có điều kiện môi trường riêng. Xem [tests/contract/README.md](../tests/contract/README.md). Ghi số passed, failed, skipped và lý do bỏ qua để người nhận bàn giao biết phạm vi đã kiểm tra.
+
+## 3. Kiểm tra chức năng thực tế
+
+| Nhóm | Thao tác | Kết quả cần đối chiếu |
+|---|---|---|
+| Khởi động | Chạy service, mở /healthz | Dịch vụ phản hồi và log khởi động rõ ràng |
+| Odoo | Đăng nhập Portal bằng tài khoản thử | Đúng người dùng và quyền truy cập |
+| Telegram | Liên kết, mở bot, bấm Start | Đúng user, private chat và binding |
+| Google | Liên kết và chọn tài khoản | Đúng tài khoản, scope và trạng thái kết nối |
+| Đọc dữ liệu | Hỏi dữ liệu Calendar, Gmail hoặc Odoo | Kết quả khớp nguồn và phạm vi được xem |
+| Ghi dữ liệu | Xem trước rồi xác nhận một thao tác thử | Bản ghi đích khớp dữ liệu đã duyệt |
+| Hủy xác nhận | Từ chối trên bản xem trước | Yêu cầu được hủy đúng phạm vi |
+| Xác nhận lặp | Gửi lại cùng xác nhận | Đối chiếu kết quả đã lưu và số lần ghi ở nguồn |
+| Mất quyền | Thu hồi quyền rồi thử lại | Yêu cầu bị từ chối đúng bước |
+| Đổi liên kết | Ngắt rồi ghép nối Telegram lại | Yêu cầu gắn binding cũ bị kiểm tra lại |
+| Job nền | Chạy báo cáo hoặc Workspace job | Theo dõi được job, callback và nội dung giao |
+| Phục hồi | Khôi phục bản sao vào môi trường thử | Đọc được dữ liệu và giải mã bằng khóa tương ứng |
+
+## 4. Kiểm tra mua hàng
+
+1. Chọn nhà cung cấp và sản phẩm đang có trên Odoo.
+2. Nhập số lượng, kiểm tra giá, thuế, đơn vị và ngày nhận trong bản xem trước.
+3. Xác nhận tạo RFQ, ghi lại số RFQ và đối chiếu dòng hàng trên Odoo.
+4. Yêu cầu xác nhận đúng RFQ đó, kiểm tra bản xem trước của bước xác nhận.
+5. Xác nhận và đọc lại trạng thái Odoo.
+6. Nếu trạng thái là to approve, thử bước duyệt bằng tài khoản có quyền rồi đối chiếu trạng thái cuối.
+7. Kiểm tra trường hợp thiếu sản phẩm, trùng tên, thiếu quyền, sửa nháp và dữ liệu nguồn thay đổi sau bản xem trước.
+
+RFQ ở draft là nháp. to approve là chờ duyệt. purchase là đơn mua đã xác nhận. Chỉ ghi nhận hoàn thành theo trạng thái thực tế và yêu cầu nghiệp vụ của ca thử.
+
+Luồng duyệt tùy chỉnh có thể bị chặn nếu Gateway chưa xác minh được điều kiện. Ghi rõ thông báo và bước còn thiếu trong biên bản.
+
+## 5. Ghi kết quả
+
+| Thông tin | Nội dung cần điền |
+|---|---|
+| Thời điểm và phiên bản | Ngày chạy, commit hoặc phiên bản triển khai |
+| Môi trường | Local hoặc Docker, SQLite hoặc PostgreSQL |
+| Ca kiểm tra | Yêu cầu, tài khoản và cờ chức năng |
+| Kết quả | Đạt, lỗi hoặc chưa kiểm tra |
+| Bằng chứng | Lệnh test, log, request_id, operation_id, số chứng từ |
+| Phần còn lại | Bước chưa chạy và nguyên nhân cụ thể |
+
+Các số liệu kiểm thử của phiên bản cũ cần được thay bằng kết quả vừa chạy khi bàn giao phiên bản mới.
+
+## 6. Kết quả rà soát ngày 27/11/2026
+
+Môi trường kiểm tra là Windows, Python 3.11 và database SQLite tạm do script test tạo.
+
+| Kiểm tra | Kết quả |
+|---|---|
+| Bộ chính qua scripts/dev.ps1 test all | 436 passed, 9 skipped |
+| Hai file test_full_lifecycle_cross_app.py và test_live_cross_app_e2e.py | 5 passed |
+| Ruff cho app, scripts, alembic và tests | Đạt |
+| Cú pháp Python | 123 file đạt |
+| Cú pháp Jinja | 22 template đạt |
+| JavaScript app.js và stitch.js | Đạt |
+| pip check | Đạt |
+| git diff --check | Đạt |
+
+Chín ca bỏ qua cần PostgreSQL dùng riêng, pgvector hoặc PostgreSQL cùng Agent peer. Các bài HTTP xuyên hai ứng dụng dùng dịch vụ ngoài mô phỏng và database tạm. Kết quả trên cần được bổ sung bằng nghiệm thu tenant và hạ tầng triển khai thực tế.
+
+Môi trường Python đã được cài pypdf 7.2.0 theo khoảng phiên bản khai báo trong pyproject.toml. Ca đọc PDF đã chạy thành công. Bộ chính còn một cảnh báo deprecation từ Starlette/AnyIO.

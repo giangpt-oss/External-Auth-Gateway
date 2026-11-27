@@ -3,7 +3,7 @@ import enum
 import json
 import logging
 import random
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -35,11 +35,11 @@ class GoogleApiError(Exception):
         self,
         error_code: GoogleErrorCode,
         message: str,
-        status_code: Optional[int] = None,
+        status_code: int | None = None,
         retryable: bool = False,
-        retry_after: Optional[float] = None,
+        retry_after: float | None = None,
         provider: str = "google_rest",
-        raw_error: Optional[Any] = None,
+        raw_error: Any | None = None,
     ):
         super().__init__(message)
         self.error_code = error_code
@@ -71,8 +71,8 @@ class UnifiedGoogleClient:
         max_global_concurrency: int = 8,
         max_user_reads: int = 2,
         max_user_writes: int = 1,
-        http_client: Optional[httpx.AsyncClient] = None,
-        circuit_breaker: Optional[Any] = None,
+        http_client: httpx.AsyncClient | None = None,
+        circuit_breaker: Any | None = None,
     ):
         self.oauth_service = oauth_service
         self.circuit_breaker = circuit_breaker
@@ -88,7 +88,7 @@ class UnifiedGoogleClient:
             timeout=httpx.Timeout(timeout=120.0, connect=3.0, pool=2.0),
         )
 
-    def get_user_google_connection(self, user_id: int, account_id: Optional[int] = None):
+    def get_user_google_connection(self, user_id: int, account_id: int | None = None):
         with self.oauth_service.session_factory() as db:
             from app.google.account_resolver import GoogleAccountResolver
             return GoogleAccountResolver.resolve_for_task(db, user_id, pinned_account_id=account_id)
@@ -112,13 +112,13 @@ class UnifiedGoogleClient:
         user_id: int,
         method: str,
         url: str,
-        params: Optional[dict[str, Any]] = None,
-        json_data: Optional[dict[str, Any]] = None,
-        headers: Optional[dict[str, str]] = None,
-        content: Optional[bytes] = None,
+        params: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
         is_write: bool = False,
         timeout: float = 120.0,
-        service: Optional[str] = None,
+        service: str | None = None,
     ) -> Any:
         # Determine service from url if not provided
         svc = service or "google_general"

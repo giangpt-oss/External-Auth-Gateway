@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -24,7 +25,7 @@ def db_session():
 def test_metrics_collector(db_session):
     collector = WorkspaceMetricsCollector()
     cb = CircuitBreaker()
-    
+
     # Record some latencies
     for d in [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]:
         collector.record_request("calendar", "rest", d, True)
@@ -46,7 +47,7 @@ def test_metrics_collector(db_session):
     db_session.commit()
 
     metrics = collector.get_metrics(db_session, cb)
-    
+
     assert metrics["total_requests"] == 12
     assert metrics["protocols"]["rest"] == 10
     assert metrics["protocols"]["mcp"] == 2

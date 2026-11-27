@@ -1,15 +1,15 @@
 import json
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Base
 from app.workspace.idempotency import (
-    IdempotencyManager,
     IdempotencyConflictError,
+    IdempotencyManager,
     compute_payload_hash,
 )
-from app.workspace.models import WorkspaceIdempotencyRecord
 
 
 @pytest.fixture
@@ -38,7 +38,7 @@ def test_idempotent_write_cached_result(db_session):
     # 1. First execution creates record
     record = manager.check_or_create(db_session, user_id=1, operation_id=op_id, payload=payload)
     assert record.status == "in_progress"
-    
+
     # Mark as completed
     manager.mark_completed(
         db_session,
@@ -46,7 +46,7 @@ def test_idempotent_write_cached_result(db_session):
         resource_id="evt_999",
         response_data={"id": "evt_999", "status": "confirmed"},
     )
-    
+
     # 2. Duplicate call with same operation_id and payload returns completed record
     dup_record = manager.check_or_create(db_session, user_id=1, operation_id=op_id, payload=payload)
     assert dup_record.status == "completed"
@@ -61,7 +61,7 @@ def test_idempotency_conflict_on_different_payload(db_session):
     payload2 = {"summary": "Call Bob"}
 
     manager.check_or_create(db_session, user_id=1, operation_id=op_id, payload=payload1)
-    
+
     with pytest.raises(IdempotencyConflictError):
         manager.check_or_create(db_session, user_id=1, operation_id=op_id, payload=payload2)
 
@@ -72,12 +72,12 @@ def test_idempotency_unknown_result_reconciliation(db_session):
     payload = {"summary": "Important Sync"}
 
     manager.check_or_create(db_session, user_id=1, operation_id=op_id, payload=payload)
-    
+
     # Simulate network timeout -> mark unknown_result
     manager.mark_unknown_result(db_session, operation_id=op_id)
     rec = manager.get_record(db_session, operation_id=op_id)
     assert rec.status == "unknown_result"
-    
+
     # Reconcile: verification confirms resource was created on Google
     reconciled = manager.reconcile(
         db_session,

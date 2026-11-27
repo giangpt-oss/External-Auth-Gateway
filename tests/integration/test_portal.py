@@ -75,8 +75,9 @@ def test_portal_login_page_renders_form(portal_client):
     assert res.status_code == 200
     assert "External Auth Gateway" in res.text
     assert "Đăng nhập bằng Odoo" in res.text
-    assert 'data-stitch-theme="light"' in res.text
-    assert 'data-stitch-theme="dark"' in res.text
+    assert 'data-stitch-theme-switch' in res.text
+    assert 'role="switch"' in res.text
+    assert 'aria-checked="false"' in res.text
     assert 'name="csrf_token"' in res.text
     assert "Tài khoản Odoo" in res.text
     assert "Mật khẩu Odoo" in res.text

@@ -1,14 +1,31 @@
 # Kiểm thử hợp đồng Workspace
 
-`workspace-v1.json` là mẫu HTTP do Gateway sở hữu. Gateway kiểm tra trường bắt buộc của phản hồi thực. Client Agent kiểm tra đường dẫn, phương thức, payload và cách nhận phản hồi từ cùng mẫu. Khi đổi hợp đồng, cập nhật phiên bản mẫu và chuyển bản sao giống từng byte sang thư mục `tests/contract` của Agent trong PR tương ứng.
+Hợp đồng là cấu trúc HTTP mà Gateway và Agent cùng sử dụng, gồm endpoint, phương thức, payload và phản hồi. Nhóm test này giúp phát hiện hai repo hiểu khác nhau về cùng lời gọi.
 
-Chạy `./scripts/dev.ps1 test contract` ở mỗi repo để kiểm tra hợp đồng riêng của dịch vụ.
+## Các file liên quan
 
-## Kiểm thử Telegram xuyên hai dịch vụ
+| File | Vai trò |
+|---|---|
+| workspace-v1.json | Fixture hợp đồng do Gateway sở hữu |
+| test_workspace_peer.py | Kiểm thử ghép Gateway với Agent qua HTTP |
 
-Chuẩn bị một PostgreSQL thử nghiệm hỗ trợ extension `vector` và một database dùng riêng cho ca kiểm thử. PostgreSQL, Agent và Gateway phải truy cập được nhau. Cài dependencies test của từng repo và chạy mỗi lệnh từ thư mục gốc repo tương ứng với môi trường cấu hình thử.
+Agent có bản sao workspace-v1.json và file workspace_peer.py trong tests/contract. Khi đổi hợp đồng, cập nhật phiên bản fixture và đồng bộ bản sao giống từng byte sang Agent.
 
-Ở terminal của Agent, khởi chạy router thực với bộ phân loại trả về ý định đọc, chuẩn bị ghi và xác nhận cố định. Các giá trị bên dưới chỉ dùng cho ca thử.
+## Chạy kiểm tra trong từng repo
+
+Chạy từ thư mục gốc repo có scripts/dev.ps1.
+
+```powershell
+./scripts/dev.ps1 test contract
+```
+
+Test peer cần thêm dịch vụ và database riêng theo phần dưới.
+
+## Chuẩn bị test xuyên hai dịch vụ
+
+Cần PostgreSQL dùng riêng cho kiểm thử, có khả năng đáp ứng các extension mà schema yêu cầu. Test tạo dữ liệu thử trong database được cấu hình. Hai repo cần cài dependencies kiểm thử và truy cập được nhau qua HTTP.
+
+Terminal Agent chạy router thật với bộ phân loại ý định cố định của fixture.
 
 ```powershell
 $env:GATEWAY_BASE_URL = 'http://127.0.0.1:8765'
@@ -19,7 +36,7 @@ $env:PYTHONPATH = ".;$((Resolve-Path tests/contract).Path)"
 python -m uvicorn workspace_peer:app --port 8766
 ```
 
-Ở terminal của Gateway, chạy bài thử và truyền URL database PostgreSQL riêng. Ca thử tạo người dùng và dữ liệu giả trong database này.
+Terminal Gateway chạy bài thử với database riêng. Thay URL PostgreSQL bên dưới bằng URL môi trường kiểm thử.
 
 ```powershell
 $env:APP_ENV = 'development'
@@ -29,4 +46,10 @@ $env:WORKSPACE_PEER_AGENT_URL = 'http://127.0.0.1:8766'
 python -m pytest -q tests/contract/test_workspace_peer.py
 ```
 
-Bài thử gửi hai lần cùng một Telegram update, theo dõi `request_id` tới job đã chốt tài khoản, xác thực token ở adapter Google và kiểm tra callback chỉ giao kết quả một lần. Lượt ghi tạo bản xem trước, gửi hai xác nhận cho cùng một thao tác và kiểm tra adapter chỉ gọi Google một lần. Odoo, Google, Telegram và LLM dùng dữ liệu mô phỏng.
+Nếu thiếu WORKSPACE_PEER_POSTGRES_URL hoặc WORKSPACE_PEER_AGENT_URL, fixture bỏ qua ca peer. Các biến này chỉ dùng trong terminal kiểm thử.
+
+## Test kiểm tra điều gì
+
+Bài thử theo dõi update Telegram trùng, request_id, job, tài khoản Google được chọn và callback. Luồng ghi kiểm tra bản xem trước, xác nhận lặp và số lần adapter gọi dịch vụ.
+
+Odoo, Google, Telegram và LLM trong ca peer dùng dữ liệu mô phỏng. Khi nghiệm thu dịch vụ thực tế, thực hiện thêm các ca trong [ACCEPTANCE.md](../../docs/ACCEPTANCE.md).
