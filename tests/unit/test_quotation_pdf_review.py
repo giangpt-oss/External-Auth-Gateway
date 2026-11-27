@@ -15,6 +15,7 @@ from app.models import Base, OdooCredential, TelegramConnection, User
 from app.quotations import pdf_review
 from app.quotations.approval import APPROVAL_METHOD
 from app.quotations.service import QuotationService, QuotationValidationError
+from app.quotations.tracking import QuotationRecordLink
 from app.reporting.context import VerifiedContext
 from app.reporting.schemas import TelegramScope
 from app.telegram.service import TelegramService
@@ -150,6 +151,8 @@ class FakeOdooClient:
         if model == "sale.order" and method == "message_post":
             self.writes.append(("message_post", args, kwargs))
             return 501
+        if model == "mail.message" and method == "search_read":
+            return [{"id": 501}]
         if model == "crm.team" and method == "search_read":
             return [{"id": 52, "display_name": "Miền Nam", "company_id": [2, "Công ty Demo"], "active": True}]
         if model == "crm.tag" and method == "search_read":
@@ -331,6 +334,8 @@ def test_pdf_lifecycle_edit_submit_feedback_and_grant(monkeypatch):
         db.add(User(id=2, tenant="https://odoo.invalid", database="db", odoo_uid=24, login="mgr", name="Trưởng phòng", active=True))
         db.add(TelegramConnection(user_id=1, telegram_user_id=101, private_chat_id=101, binding_id="bind_sale", status="connected"))
         db.add(TelegramConnection(user_id=2, telegram_user_id=202, private_chat_id=202, binding_id="bind_mgr", status="connected"))
+        db.add(QuotationRecordLink(user_id=1, operation_id="op-97", tenant="https://odoo.invalid",
+                                   database="db", order_id=97, company_id=2))
         db.commit()
 
     odoo = FakeOdooClient()

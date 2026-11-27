@@ -18,6 +18,7 @@ from app.odoo.client import OdooAccessError, OdooError
 from app.quotations.approval import APPROVAL_LABELS, QuotationApproval, read_approval_status
 from app.quotations.pdf import render_quotation_pdf
 from app.quotations.service import QuotationService, QuotationValidationError, _id, _m2o, _number
+from app.quotations.tracking import QuotationRecordLink
 from app.reporting.context import bound_telegram_user
 from app.reporting.schemas import TelegramScope
 from app.telegram.client import TelegramClient, TelegramDeliveryUnknownError, TelegramError
@@ -59,8 +60,8 @@ def sale_pdf_keyboard(token: str, *, can_request_approval: bool) -> list[list[di
 
 def approver_pdf_keyboard(token: str) -> list[list[dict[str, str]]]:
     return [[
-        {"text": "Xác nhận duyệt", "callback_data": f"qgrant:{token}"},
-        {"text": "Cần chỉnh sửa", "callback_data": f"qfeed:{token}"},
+        {"text": "Phê duyệt", "callback_data": f"qgrant:{token}"},
+        {"text": "Yêu cầu chỉnh sửa", "callback_data": f"qfeed:{token}"},
     ]]
 
 
@@ -255,6 +256,8 @@ def retry_sale_pdf(
     sf = request.app.state.session_factory
     svc = QuotationService(ctx.service.client, ctx.user.odoo_uid, ctx.secret)
     chosen_company, _ = svc._companies(company_id)
+    with sf() as db:
+        bound_telegram_user(db, user_id, scope)
     if order_id is None:
         if not name or not str(name).strip():
             raise QuotationValidationError("Cần cung cấp mã hoặc ID báo giá để gửi lại PDF.")
@@ -262,7 +265,16 @@ def retry_sale_pdf(
         if found.get("status") != "OK":
             return {"status": "error", "message": found.get("message") or "Không tìm thấy báo giá trên Odoo."}
         order_id = found["result"]["id"]
+    with sf() as db:
+        linked = db.query(QuotationRecordLink).filter_by(
+            user_id=user_id, tenant=ctx.user.tenant, database=ctx.user.database,
+            order_id=order_id, company_id=chosen_company,
+        ).first()
+    if linked is None:
+        return {"status": "stale", "message": "Báo giá không thuộc bản nháp đã tạo từ tài khoản này."}
     order = _read_order_for_token(ctx, _id(order_id, "order_id"), chosen_company)
+    if order.get("state") != "draft":
+        return {"status": "locked", "message": "Báo giá không còn ở trạng thái nháp."}
     if getattr(settings, "ENABLE_QUOTATION_APPROVAL_FLOW", False):
         order["approval"] = read_approval_status(ctx, order)
     filename, content = render_quotation_pdf(ctx, order)
@@ -272,8 +284,6 @@ def retry_sale_pdf(
     )
     keyboard = sale_pdf_keyboard(token, can_request_approval=_can_request_approval(settings, order)) if order.get("state") == "draft" else None
     client = TelegramClient(settings.TELEGRAM_BOT_TOKEN)
-    with sf() as db:
-        bound_telegram_user(db, user_id, scope)
     sent = client.send_document(
         scope.chat_id,
         filename,
@@ -432,6 +442,106 @@ def _can_receive_approval(settings, sf, person, order_id: int, company_id: int, 
                         for rule in own["rules"]))
 
 
+def _deliver_pending_approval_pdfs(request, ctx, adapter, state, order,
+                                   requester_user_id, requester_chat_id,
+                                   requester_binding_id, requester_name):
+    """Send only the current Studio step, reusing confirmed deliveries on retries."""
+    settings = request.app.state.settings
+    sf = request.app.state.session_factory
+    approver_uids = _find_approver_uids(adapter, state)
+    delivered_count = uncertain_count = 0
+    missing_names: list[str] = []
+    failed_names: list[str] = []
+    if not settings.TELEGRAM_BOT_TOKEN or not approver_uids:
+        return delivered_count, uncertain_count, missing_names, failed_names
+    try:
+        people = adapter.call("res.users", "search_read", [[("id", "in", sorted(approver_uids))]],
+                              fields=["id", "name"], limit=len(approver_uids))
+        names = {person["id"]: person["name"] for person in people}
+    except OdooError:
+        names = {}
+    try:
+        filename, pdf_bytes = render_quotation_pdf(ctx, order)
+        client = TelegramClient(settings.TELEGRAM_BOT_TOKEN)
+        with sf() as db:
+            targets = (
+                db.query(User, TelegramConnection)
+                .join(TelegramConnection, TelegramConnection.user_id == User.id)
+                .filter(
+                    User.active.is_(True),
+                    User.tenant == ctx.user.tenant,
+                    User.database == ctx.user.database,
+                    User.odoo_uid.in_(list(approver_uids)),
+                    TelegramConnection.status == "connected",
+                ).all()
+            )
+        linked_uids = {person.odoo_uid for person, connection in targets
+                       if connection.binding_id and connection.private_chat_id}
+        missing_names = [names.get(uid, f"Odoo #{uid}") for uid in sorted(approver_uids - linked_uids)]
+        for approver_user, tg_conn in targets:
+            if not tg_conn.binding_id or not tg_conn.private_chat_id:
+                continue
+            try:
+                if not _can_receive_approval(settings, sf, approver_user,
+                                             order["id"], _m2o(order["company_id"]), state):
+                    continue
+            except OdooError as exc:
+                logger.warning("Could not verify approver %s: %s", approver_user.id, type(exc).__name__)
+                failed_names.append(names.get(approver_user.odoo_uid, f"Odoo #{approver_user.odoo_uid}"))
+                continue
+            with sf() as db:
+                previous = db.query(QuotationPdfToken).filter_by(
+                    role="approver", user_id=approver_user.id,
+                    tenant=ctx.user.tenant, database=ctx.user.database,
+                    order_id=order["id"], order_version=_order_version(order),
+                    active=1,
+                ).order_by(QuotationPdfToken.created_at.desc()).first()
+                if previous:
+                    if previous.message_id is not None:
+                        delivered_count += 1
+                    else:
+                        uncertain_count += 1
+                    continue
+                appr_token = secrets.token_hex(12)
+                db.add(QuotationPdfToken(
+                    token=appr_token, role="approver", user_id=approver_user.id,
+                    tenant=ctx.user.tenant, database=ctx.user.database,
+                    chat_id=tg_conn.private_chat_id,
+                    telegram_binding_id=tg_conn.binding_id,
+                    order_id=order["id"], order_name=order["name"],
+                    company_id=_m2o(order["company_id"]),
+                    order_version=_order_version(order),
+                    requester_user_id=requester_user_id,
+                    requester_chat_id=requester_chat_id,
+                    requester_binding_id=requester_binding_id,
+                    active=1, created_at=time.time(),
+                ))
+                db.commit()
+            try:
+                sent = client.send_document(
+                    tg_conn.private_chat_id, filename, pdf_bytes,
+                    caption=_pdf_caption(order, prefix=(
+                        f"📋 Yêu cầu phê duyệt báo giá {order['name']} từ {requester_name}.")),
+                    content_type="application/pdf",
+                    inline_keyboard=approver_pdf_keyboard(appr_token),
+                )
+                mark_pdf_token_delivered(sf, appr_token, sent)
+                delivered_count += 1
+            except Exception as exc:
+                if isinstance(exc, TelegramError) and not isinstance(exc, TelegramDeliveryUnknownError):
+                    with sf() as db:
+                        db.query(QuotationPdfToken).filter_by(token=appr_token).update({"active": 0})
+                        db.commit()
+                    failed_names.append(names.get(approver_user.odoo_uid, f"Odoo #{approver_user.odoo_uid}"))
+                else:
+                    uncertain_count += 1
+                logger.warning("Could not deliver approval PDF to approver %s: %s",
+                               approver_user.id, type(exc).__name__)
+    except Exception as exc:
+        logger.warning("Could not render PDF for approver delivery: %s", type(exc).__name__)
+    return delivered_count, uncertain_count, missing_names, failed_names
+
+
 def submit_pdf_approval(request, ctx, user_id: int, scope: TelegramScope, token: str) -> dict[str, Any]:
     settings = request.app.state.settings
     if not getattr(settings, "ENABLE_QUOTATION_APPROVAL_FLOW", False):
@@ -448,6 +558,11 @@ def submit_pdf_approval(request, ctx, user_id: int, scope: TelegramScope, token:
         return {"status": "stale", "message": f"Báo giá {order['name']} đã thay đổi kể từ bản PDF này. Hãy kiểm tra bản PDF mới nhất."}
     if order.get("state") != "draft":
         return {"status": "error", "message": f"Báo giá {order['name']} không ở trạng thái nháp nên không thể gửi duyệt."}
+
+    adapter = QuotationApproval(ctx.service.client, ctx.user.odoo_uid, ctx.secret, row.company_id)
+    initial_state = adapter.inspect(order["id"])
+    if initial_state.get("status") in ("approved", "rejected"):
+        return {"status": "stale", "message": "Báo giá đã có kết quả duyệt trên Odoo."}
 
     business = BusinessService(ctx)
     business.company_id = row.company_id
@@ -471,105 +586,19 @@ def submit_pdf_approval(request, ctx, user_id: int, scope: TelegramScope, token:
         )
         db.commit()
 
-    adapter = QuotationApproval(ctx.service.client, ctx.user.odoo_uid, ctx.secret, row.company_id)
     state = adapter.request(order["id"])
     if state.get("status") != "pending":
         return {"status": "error", "message": "Odoo chưa ghi nhận trạng thái chờ duyệt cho báo giá này."}
 
     refreshed = _read_order_for_token(ctx, order["id"], row.company_id)
-    new_version = _order_version(refreshed)
     with sf() as db:
         db.query(QuotationApprovalReview).filter_by(key=key, operation_id=op_id).update({"verified": 1})
         db.commit()
 
-    approver_uids = _find_approver_uids(adapter, state)
-    delivered_count = 0
-    uncertain_count = 0
-    if settings.TELEGRAM_BOT_TOKEN and approver_uids:
-        try:
-            filename, pdf_bytes = render_quotation_pdf(ctx, refreshed)
-            client = TelegramClient(settings.TELEGRAM_BOT_TOKEN)
-            with sf() as db:
-                targets = (
-                    db.query(User, TelegramConnection)
-                    .join(TelegramConnection, TelegramConnection.user_id == User.id)
-                    .filter(
-                        User.active.is_(True),
-                        User.tenant == ctx.user.tenant,
-                        User.database == ctx.user.database,
-                        User.odoo_uid.in_(list(approver_uids)),
-                        TelegramConnection.status == "connected",
-                    )
-                    .all()
-                )
-            for approver_user, tg_conn in targets:
-                if not tg_conn.binding_id or not tg_conn.private_chat_id:
-                    continue
-                try:
-                    if not _can_receive_approval(settings, sf, approver_user,
-                                                 order["id"], row.company_id, state):
-                        continue
-                except OdooError as exc:
-                    logger.warning("Could not verify approver %s: %s", approver_user.id, type(exc).__name__)
-                    continue
-                with sf() as db:
-                    previous = db.query(QuotationPdfToken).filter_by(
-                        role="approver", user_id=approver_user.id,
-                        tenant=ctx.user.tenant, database=ctx.user.database,
-                        order_id=refreshed["id"], order_version=new_version,
-                        active=1,
-                    ).order_by(QuotationPdfToken.created_at.desc()).first()
-                    if previous:
-                        if previous.message_id is not None:
-                            delivered_count += 1
-                        else:
-                            uncertain_count += 1
-                        continue
-                    appr_token = secrets.token_hex(12)
-                    db.add(
-                        QuotationPdfToken(
-                            token=appr_token,
-                            role="approver",
-                            user_id=approver_user.id,
-                            tenant=ctx.user.tenant,
-                            database=ctx.user.database,
-                            chat_id=tg_conn.private_chat_id,
-                            telegram_binding_id=tg_conn.binding_id,
-                            order_id=refreshed["id"],
-                            order_name=refreshed["name"],
-                            company_id=row.company_id,
-                            order_version=new_version,
-                            requester_user_id=user_id,
-                            requester_chat_id=scope.chat_id,
-                            requester_binding_id=scope.telegram_binding_id,
-                            active=1,
-                            created_at=time.time(),
-                        )
-                    )
-                    db.commit()
-                try:
-                    caption = _pdf_caption(
-                        refreshed,
-                        prefix=f"📋 Yêu cầu phê duyệt báo giá {refreshed['name']} từ {ctx.user.name}.",
-                    )
-                    sent = client.send_document(
-                        tg_conn.private_chat_id,
-                        filename,
-                        pdf_bytes,
-                        caption=caption,
-                        content_type="application/pdf",
-                        inline_keyboard=approver_pdf_keyboard(appr_token),
-                    )
-                    mark_pdf_token_delivered(sf, appr_token, sent)
-                    delivered_count += 1
-                except Exception as exc:
-                    if isinstance(exc, TelegramError) and not isinstance(exc, TelegramDeliveryUnknownError):
-                        with sf() as db:
-                            db.query(QuotationPdfToken).filter_by(token=appr_token).update({"active": 0})
-                            db.commit()
-                    logger.warning("Could not deliver approval PDF to approver %s: %s", approver_user.id, type(exc).__name__)
-        except Exception as exc:
-            logger.warning("Could not render PDF for approver delivery: %s", type(exc).__name__)
+    delivered_count, uncertain_count, missing_names, failed_names = _deliver_pending_approval_pdfs(
+        request, ctx, adapter, state, refreshed, user_id, scope.chat_id,
+        scope.telegram_binding_id, ctx.user.name,
+    )
 
     suffix = (
         f" Đã gửi PDF cần duyệt tới {delivered_count} cấp trên qua Telegram."
@@ -578,6 +607,10 @@ def submit_pdf_approval(request, ctx, user_id: int, scope: TelegramScope, token:
     )
     if uncertain_count:
         suffix += f" Có {uncertain_count} lượt gửi chưa xác định kết quả; không tự gửi trùng PDF."
+    if missing_names:
+        suffix += " Chưa liên kết Telegram: " + ", ".join(missing_names) + "."
+    if failed_names:
+        suffix += " Gửi Telegram thất bại: " + ", ".join(failed_names) + "."
     return {"status": "sent", "message": f"Đã gửi yêu cầu duyệt nội bộ cho báo giá {refreshed['name']}.{suffix}"}
 
 
@@ -655,7 +688,19 @@ def decide_approval_pdf(
                     order_id=order["id"], active=1,
                 ).update({"active": 0})
             db.commit()
+        next_stage_count = 0
+        if result_state.get("status") == "pending":
+            refreshed = _read_order_for_token(ctx, order["id"], row.company_id)
+            with sf() as db:
+                requester = db.get(User, row.requester_user_id) if row.requester_user_id else None
+                requester_name = requester.name if requester else "người gửi"
+            next_stage_count, _, _, _ = _deliver_pending_approval_pdfs(
+                request, ctx, adapter, result_state, refreshed,
+                row.requester_user_id, row.requester_chat_id,
+                row.requester_binding_id, requester_name,
+            )
         if settings.TELEGRAM_BOT_TOKEN and row.requester_user_id and row.requester_chat_id and row.requester_binding_id:
+            event_token = None
             try:
                 req_scope = TelegramScope(
                     telegram_user_id=row.requester_chat_id,
@@ -670,35 +715,72 @@ def decide_approval_pdf(
                         status="connected",
                     ).first()
                 if tg:
-                    TelegramClient(settings.TELEGRAM_BOT_TOKEN).send_message(
-                        row.requester_chat_id,
-                        f"✅ Cấp trên ({ctx.user.name}) đã phê duyệt báo giá {order['name']}.",
-                    )
+                    step_note = (f" Đã gửi PDF cho {next_stage_count} người duyệt ở bước kế tiếp."
+                                 if result_state.get("status") == "pending"
+                                 else "")
+                    from app.quotations.approval_sync import _event_token, _mark_delivery, _reserve
+                    with sf() as db:
+                        sale_pdf = db.query(QuotationPdfToken).filter_by(
+                            role="sale", user_id=row.requester_user_id,
+                            tenant=ctx.user.tenant, database=ctx.user.database,
+                            order_id=order["id"], order_version=row.order_version,
+                            chat_id=row.requester_chat_id,
+                            telegram_binding_id=row.requester_binding_id,
+                        ).order_by(QuotationPdfToken.created_at.desc()).first()
+                    entries = [entry for entry in result_state.get("entries") or []
+                               if entry.get("rule_id", [None])[0] == rule_id
+                               and type(entry.get("id")) is int]
+                    event_token = _event_token(sale_pdf, entries[-1]) if sale_pdf and entries else None
+                    if event_token is None or _reserve(sf, sale_pdf, event_token):
+                        sent = TelegramClient(settings.TELEGRAM_BOT_TOKEN).send_message(
+                            row.requester_chat_id,
+                            f"✅ {ctx.user.name} đã phê duyệt bước của mình cho báo giá {order['name']}.{step_note}",
+                        )
+                        if event_token:
+                            _mark_delivery(sf, event_token, sent)
             except Exception as exc:
+                if event_token and isinstance(exc, TelegramError) and not isinstance(exc, TelegramDeliveryUnknownError):
+                    with sf() as db:
+                        db.query(QuotationPdfToken).filter_by(token=event_token, role="sync",
+                                                               message_id=None).delete()
+                        db.commit()
                 logger.warning("Could not notify requester of approval: %s", type(exc).__name__)
+        if result_state.get("status") == "pending":
+            return {"status": "approved_pending", "message":
+                    f"Đã phê duyệt bước hiện tại của {order['name']}; Odoo còn bước duyệt tiếp theo. "
+                    f"Đã xác nhận gửi PDF cho {next_stage_count} người duyệt ở bước này."}
         return {"status": "approved", "message": f"Đã phê duyệt báo giá {order['name']} trên Odoo."}
 
     clean_feedback = feedback.strip()[:2000]
     if not clean_feedback:
         return {"status": "error", "message": "Nội dung góp ý không được để trống."}
 
-    # Post internal note to Odoo chatter if supported, and clear pending request so salesperson can edit & resubmit
-    try:
-        adapter.call(
-            "sale.order",
-            "message_post",
-            [order["id"]],
-            body=f"<p><b>Góp ý duyệt từ {html.escape(ctx.user.name or 'cấp trên')}:</b> {html.escape(clean_feedback)}</p>",
-            subtype_xmlid="mail.mt_note",
-        )
-    except OdooError:
-        pass
+    # Verify the Odoo note before reporting feedback as recorded or notifying the sale.
+    note_id = adapter.call(
+        "sale.order", "message_post", [[order["id"]]],
+        body=f"<p><b>Góp ý duyệt từ {html.escape(ctx.user.name or 'cấp trên')}:</b> {html.escape(clean_feedback)}</p>",
+        message_type="comment", subtype_xmlid="mail.mt_note", partner_ids=[],
+        context={"mail_notify_force_send": False, "mail_post_autofollow": False},
+    )
+    if type(note_id) is not int or note_id <= 0:
+        raise OdooError("Odoo chưa trả về ID ghi chú góp ý.")
+    recorded = adapter.call(
+        "mail.message", "search_read", [[
+            ("id", "=", note_id), ("model", "=", "sale.order"),
+            ("res_id", "=", order["id"]),
+        ]], fields=["id"], limit=1,
+    )
+    if len(recorded) != 1 or recorded[0].get("id") != note_id:
+        raise OdooError("Odoo chưa xác minh ghi chú góp ý trên báo giá.")
+
+    # Clear the pending request so the sale can edit and resubmit.
     req_ids = [r["id"] for r in state.get("requests") or [] if isinstance(r.get("id"), int)]
     if req_ids:
-        try:
-            adapter.call("studio.approval.request", "unlink", [req_ids])
-        except OdooError:
-            pass
+        if adapter.call("studio.approval.request", "unlink", [req_ids]) is not True:
+            raise OdooError("Odoo chưa xác nhận đã đóng yêu cầu duyệt cũ.")
+    remaining = adapter.inspect(order["id"])
+    if remaining.get("requests"):
+        raise OdooError("Odoo vẫn còn yêu cầu duyệt đang chờ; chưa thể gửi báo giá để sửa.")
 
     with sf() as db:
         db.query(QuotationPdfToken).filter_by(

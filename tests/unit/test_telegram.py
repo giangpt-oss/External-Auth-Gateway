@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -188,6 +188,23 @@ def test_telegram_pairing_expired_or_invalid_token(telegram_components):
     call_args = mock_client.send_message.call_args
     msg_sent = call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("text", "")
     assert "hết hạn" in msg_sent or "không hợp lệ" in msg_sent
+
+
+def test_expired_pairing_token_cannot_bind_account(telegram_components):
+    service, sf, user_id, _ = telegram_components
+    token = service.issue_link(user_id).url.split("start=")[1]
+    with sf() as db:
+        db.query(LinkToken).filter_by(user_id=user_id, purpose="telegram_link").update(
+            {"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+        )
+        db.commit()
+    service.process_update_dict({"update_id": 1004, "message": {
+        "from": {"id": 123456, "is_bot": False},
+        "chat": {"id": 123456, "type": "private"},
+        "text": f"/start {token}",
+    }})
+    with sf() as db:
+        assert db.query(TelegramConnection).filter_by(user_id=user_id).first() is None
 
 
 def test_telegram_rejects_already_linked_to_different_user(telegram_components):

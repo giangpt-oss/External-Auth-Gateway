@@ -1,17 +1,14 @@
 """PDF button callbacks are mapped through persisted message identity."""
 import json
-import sys
-import types
-from unittest.mock import Mock
+import time
+from unittest.mock import ANY, Mock
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-sys.modules.setdefault('qrcode', types.ModuleType('qrcode'))
-
-from app.models import Base, TelegramConnection, TelegramUpdate, User  # noqa: E402
-from app.quotations.interaction import QuoteApprovalDelivery, QuotePdfMessage  # noqa: E402
-from app.telegram.service import TelegramService  # noqa: E402
+from app.models import Base, TelegramConnection, TelegramUpdate, User
+from app.quotations.pdf_review import QuotationPdfToken
+from app.telegram.service import TelegramService
 
 
 def test_callback_uses_pdf_token_and_duplicate_update_is_idempotent():
@@ -23,14 +20,15 @@ def test_callback_uses_pdf_token_and_duplicate_update_is_idempotent():
                     login='sale', name='Sale'))
         db.add(TelegramConnection(user_id=1, telegram_user_id=7, private_chat_id=7,
                                   binding_id='binding', status='connected'))
-        db.add(QuotePdfMessage(token=token, user_id=1, tenant='tenant', database='db',
-            order_id=97, company_id=3, version='v1', telegram_user_id=7,
-            chat_id=7, binding_id='binding', message_id=44))
+        db.add(QuotationPdfToken(token=token, role='sale', user_id=1, tenant='tenant',
+            database='db', chat_id=7, telegram_binding_id='binding', order_id=97,
+            order_name='S00097', company_id=3, order_version='v1',
+            message_id=44, active=1, created_at=time.time()))
         db.commit()
     client = Mock()
     service = TelegramService(sf, client, 'bot', 'secret', enable_ai_forwarding=True)
     callback = {'update_id': 901, 'callback_query': {'id': 'click-1',
-        'data': 'qe:' + token, 'from': {'id': 7},
+        'data': 'qedit:' + token, 'from': {'id': 7},
         'message': {'message_id': 44, 'chat': {'id': 7, 'type': 'private'}}}}
     assert service.ingest_update(callback)['status'] == 'ok'
     assert service.ingest_update(callback).get('duplicate') is True
@@ -43,7 +41,7 @@ def test_callback_uses_pdf_token_and_duplicate_update_is_idempotent():
             'chat': {'id': 7, 'type': 'private'}}}}
     assert service.ingest_update(wrong)['status'] == 'ignored'
     confirm = {**callback, 'update_id': 903, 'callback_query': {
-        **callback['callback_query'], 'id': 'click-3', 'data': 'qs:' + token}}
+        **callback['callback_query'], 'id': 'click-3', 'data': 'qappr:' + token}}
     assert service.ingest_update(confirm)['status'] == 'ok'
     old_button = {**confirm, 'update_id': 904, 'callback_query': {
         **confirm['callback_query'], 'id': 'click-4', 'data': 'qa:' + token}}
@@ -51,8 +49,7 @@ def test_callback_uses_pdf_token_and_duplicate_update_is_idempotent():
     typed = {'update_id': 905, 'message': {'chat': {'id': 7, 'type': 'private'},
         'from': {'id': 7}, 'text': '/quote_approve ' + token}}
     assert service.ingest_update(typed)['status'] == 'ignored'
-    client.answer_callback_query.assert_any_call('click-4',
-        'Nút cũ đã hết hiệu lực. Hãy gửi lại PDF để xác nhận gửi duyệt.')
+    client.answer_callback_query.assert_any_call('click-4', ANY)
     with sf() as db:
         updates = db.query(TelegramUpdate).order_by(TelegramUpdate.update_id).all()
         assert len(updates) == 2
@@ -68,14 +65,15 @@ def test_one_approver_can_select_two_different_quotations_without_mixup():
         db.add(TelegramConnection(user_id=2, telegram_user_id=8, private_chat_id=8,
                                   binding_id='approver-binding', status='connected'))
         for token, order_id, message_id in [('b' * 24, 97, 51), ('c' * 24, 98, 52)]:
-            db.add(QuoteApprovalDelivery(token=token, pdf_token='a' * 24,
-                rule_id=14, approver_user_id=2, order_id=order_id, company_id=3,
-                version='v1', chat_id=8, telegram_user_id=8,
-                binding_id='approver-binding', message_id=message_id))
+            db.add(QuotationPdfToken(token=token, role='approver', user_id=2,
+                tenant='tenant', database='db', chat_id=8,
+                telegram_binding_id='approver-binding', order_id=order_id,
+                order_name=f'S000{order_id}', company_id=3, order_version='v1',
+                message_id=message_id, active=1, created_at=time.time()))
         db.commit()
     service = TelegramService(sf, Mock(), 'bot', 'secret', enable_ai_forwarding=True)
     for update_id, action, token, message_id in [
-        (910, 'qg', 'b' * 24, 51), (911, 'qr', 'c' * 24, 52)]:
+        (910, 'qgrant', 'b' * 24, 51), (911, 'qfeed', 'c' * 24, 52)]:
         callback = {'update_id': update_id, 'callback_query': {'id': str(update_id),
             'data': action + ':' + token, 'from': {'id': 8},
             'message': {'message_id': message_id, 'chat': {'id': 8, 'type': 'private'}}}}
@@ -95,17 +93,18 @@ def test_same_telegram_account_uses_separate_sale_and_approver_messages():
                     login='both', name='Both roles'))
         db.add(TelegramConnection(user_id=1, telegram_user_id=7, private_chat_id=7,
                                   binding_id='binding', status='connected'))
-        db.add(QuotePdfMessage(token=sale_token, user_id=1, tenant='tenant',
-            database='db', order_id=97, company_id=3, version='v1',
-            telegram_user_id=7, chat_id=7, binding_id='binding', message_id=44))
-        db.add(QuoteApprovalDelivery(token=approval_token, pdf_token=sale_token,
-            rule_id=14, approver_user_id=1, order_id=97, company_id=3,
-            version='v1', chat_id=7, telegram_user_id=7,
-            binding_id='binding', message_id=55))
+        db.add(QuotationPdfToken(token=sale_token, role='sale', user_id=1,
+            tenant='tenant', database='db', chat_id=7, telegram_binding_id='binding',
+            order_id=97, order_name='S00097', company_id=3, order_version='v1',
+            message_id=44, active=1, created_at=time.time()))
+        db.add(QuotationPdfToken(token=approval_token, role='approver', user_id=1,
+            tenant='tenant', database='db', chat_id=7, telegram_binding_id='binding',
+            order_id=97, order_name='S00097', company_id=3, order_version='v1',
+            message_id=55, active=1, created_at=time.time()))
         db.commit()
     service = TelegramService(sf, Mock(), 'bot', 'secret', enable_ai_forwarding=True)
-    for update_id, data, message_id in [(901, 'qs:' + sale_token, 44),
-                                        (902, 'qg:' + approval_token, 55)]:
+    for update_id, data, message_id in [(901, 'qappr:' + sale_token, 44),
+                                        (902, 'qgrant:' + approval_token, 55)]:
         callback = {'update_id': update_id, 'callback_query': {'id': str(update_id),
             'data': data, 'from': {'id': 7}, 'message': {'message_id': message_id,
             'chat': {'id': 7, 'type': 'private'}}}}

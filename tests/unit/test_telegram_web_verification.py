@@ -10,6 +10,61 @@ from app.models import TelegramConnection
 from app.odoo.service import OdooService
 
 
+def test_portal_uses_private_bot_pairing_when_web_oauth_is_unconfigured(
+    temp_db_path, fernet_key, monkeypatch,
+):
+    from app.telegram.service import create_telegram_service
+    from app.models import LinkToken
+
+    settings = Settings(
+        APP_ENV="test", DATABASE_URL=f"sqlite:///{temp_db_path}",
+        ENCRYPTION_KEY=fernet_key, TELEGRAM_BOT_TOKEN="fixture-token",
+        TELEGRAM_BOT_USERNAME="ExampleOfficeBot",
+        ODOO_EMPLOYEE_TELEGRAM_ID_FIELD="",
+    )
+    app = create_app(settings)
+    monkeypatch.setattr("app.odoo.client.OdooClient.authenticate_password",
+                        lambda *args, **kwargs: 12)
+    monkeypatch.setattr("app.odoo.client.OdooClient.execute",
+                        lambda *args, **kwargs: [{
+                            "id": 12, "active": True, "share": False,
+                            "name": "Approver",
+                        }])
+    with TestClient(app, follow_redirects=False) as client:
+        login = client.post("/auth/login", data={"login": "approver@example.test", "secret": "key"})
+        assert login.status_code == 200
+        csrf = login.json()["csrf_token"]
+        assert client.post("/connections/telegram/verify", data={"csrf_token": "bad"}).status_code == 403
+        start = client.post("/connections/telegram/verify", data={"csrf_token": csrf},
+                            headers={"Accept": "application/json"})
+        assert start.status_code == 200
+        link = start.json()["link_url"]
+        assert link.startswith("https://t.me/ExampleOfficeBot?start=")
+        token = parse_qs(urlsplit(link).query)["start"][0]
+        telegram = MagicMock()
+        service = create_telegram_service(settings, app.state.session_factory,
+                                          telegram_client=telegram)
+        service.process_update_dict({"update_id": 101, "message": {
+            "from": {"id": 1234567890, "is_bot": False},
+            "chat": {"id": 1234567890, "type": "private"},
+            "text": f"/start {token}",
+        }})
+        status = client.get("/connections/telegram/verification-status").json()
+        assert status["linked"] is True and status["revision"]
+        with app.state.session_factory() as db:
+            connection = db.query(TelegramConnection).one()
+            assert connection.telegram_user_id == 1234567890
+            assert connection.private_chat_id == 1234567890
+            assert db.query(LinkToken).filter_by(purpose="telegram_link").one().used_at
+        service.process_update_dict({"update_id": 102, "message": {
+            "from": {"id": 9999999999, "is_bot": False},
+            "chat": {"id": 9999999999, "type": "private"},
+            "text": f"/start {token}",
+        }})
+        with app.state.session_factory() as db:
+            assert db.query(TelegramConnection).one().telegram_user_id == 1234567890
+
+
 @pytest.mark.parametrize(("raw", "expected"), [
     (" 9876543210 ", 9876543210), (42, 42), (False, None),
     ("@someone", None), (True, None), ("-1", None),

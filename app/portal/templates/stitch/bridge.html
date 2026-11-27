@@ -8,6 +8,7 @@
   "selectionVersion": {{ selection.selection_version|default(1)|tojson }},
   "draining": {{ (selection.state|default('') == 'draining')|tojson }},
   "telegramState": {{ telegram_state|default('not_verified')|tojson }},
+  "telegramLinked": {{ telegram_linked|default(false)|tojson }},
   "telegramRevision": {{ telegram_revision|default('')|tojson }},
   "telegramConfigured": {{ telegram_web_configured|default(false)|tojson }},
   "workspaceApps": {{ workspace_apps|default({})|tojson }},

@@ -166,7 +166,10 @@ def dashboard_page(
             **telegram,
             "telegram_bot_url": telegram_bot_url,
             "telegram_web_enabled": bool(request.app.state.settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD),
-            "telegram_web_configured": request.app.state.settings.telegram_web_configured,
+            "telegram_web_configured": settings.telegram_web_configured or bool(
+                not settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD
+                and settings.TELEGRAM_BOT_TOKEN and bot_username
+            ),
             "workspace_apps": workspace_apps,
             "csrf_token": csrf_token,
         },
@@ -212,7 +215,10 @@ def telegram_verification_options(
         context={
             "user": user,
             "csrf_token": csrf_token,
-            "telegram_web_configured": settings.telegram_web_configured,
+            "telegram_web_configured": settings.telegram_web_configured or bool(
+                not settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD
+                and settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_BOT_USERNAME
+            ),
             **_telegram_context(request, user, connection, auth),
         },
         headers={"Cache-Control": "no-store"},

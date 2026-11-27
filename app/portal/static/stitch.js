@@ -152,7 +152,7 @@ async function pollTelegram() {
     }
     if (response.ok) {
       const status = await response.json();
-      if (status.verified && status.revision !== context.telegramRevision) {
+      if (status.linked && status.revision !== context.telegramRevision) {
         location.reload();
         return;
       }
@@ -232,7 +232,11 @@ async function verifyTelegram(button, { silent = false } = {}) {
 // Automatically load the real Telegram verification QR code on dashboard open
 const initialQr = document.querySelector("[data-stitch-qr]");
 const initialVerifyBtn = document.querySelector('[data-stitch-action="verify-telegram"]');
-if (initialQr && context.telegramConfigured && context.telegramState !== "verified") {
+if (initialVerifyBtn && context.telegramLinked && context.telegramState !== "verified") {
+  const label = initialVerifyBtn.querySelector("span:last-child");
+  if (label) label.textContent = "Liên kết lại Telegram";
+}
+if (initialQr && context.telegramConfigured && !context.telegramLinked) {
   verifyTelegram(initialVerifyBtn, { silent: true });
 }
 

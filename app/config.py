@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     TELEGRAM_WEB_CLIENT_ID: str = ""
     TELEGRAM_WEB_CLIENT_SECRET: str = ""
     TELEGRAM_WEB_BASE_URL: str = ""
+    ENABLE_QUOTATION_APPROVAL_SYNC: bool = False
 
     @property
     def telegram_web_configured(self) -> bool:

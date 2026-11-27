@@ -146,7 +146,18 @@ class QuotationApproval:
         order = min(int(rule.get('notification_order') or 1) for rule in remaining)
         stage = [rule for rule in remaining
                  if int(rule.get('notification_order') or 1) == order]
-        recipients = sorted({uid for rule in stage for uid in rule.get('approver_ids') or []})
+        recipient_ids = {uid for rule in stage for uid in rule.get('approver_ids') or []
+                         if type(uid) is int}
+        for rule in stage:
+            group = rule.get('approval_group_id')
+            group_id = group[0] if isinstance(group, (list, tuple)) and group else group
+            if type(group_id) is int:
+                groups = self.call('res.groups', 'read', [[group_id]], fields=['users'])
+                if len(groups) != 1:
+                    raise OdooError('Không xác minh được nhóm người duyệt hiện hành.')
+                recipient_ids.update(uid for uid in groups[0].get('users') or []
+                                     if type(uid) is int)
+        recipients = sorted(recipient_ids)
         if not recipients:
             raise OdooError('Bước duyệt không có người nhận activity Odoo.')
         rows = self.call('mail.activity', 'search_read', [[

@@ -71,9 +71,22 @@ def start_verification(
         raise HTTPException(403, "Yêu cầu xác minh không hợp lệ.")
     settings = request.app.state.settings
     if not settings.telegram_web_configured:
+        # Development installations pair through a private /start update from
+        # the configured bot. The token is scoped to this logged-in Odoo user.
+        if settings.ODOO_EMPLOYEE_TELEGRAM_ID_FIELD or not settings.TELEGRAM_BOT_TOKEN:
+            raise HTTPException(400, "Chưa cấu hình liên kết Telegram.")
+        from app.telegram.service import create_telegram_service
+        link = create_telegram_service(
+            settings, request.app.state.session_factory,
+        ).issue_link(user.id)
         if "application/json" in request.headers.get("Accept", ""):
-            raise HTTPException(400, "Chưa cấu hình xác minh bằng ứng dụng Telegram.")
-        return _error("Chưa cấu hình xác minh bằng ứng dụng Telegram.")
+            return JSONResponse({
+                "link_url": link.url,
+                "qr_code_data_uri": link.qr_code_data_uri,
+                "expires_at": link.expires_at.isoformat(),
+            }, headers={"Cache-Control": "no-store"})
+        return RedirectResponse(link.url, status_code=303,
+                                headers={"Cache-Control": "no-store"})
 
     expires_at = datetime.now(UTC) + timedelta(minutes=5)
     state = generate_secure_token()

@@ -7,9 +7,9 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base
-from app.quotations.interaction import QuoteApprovalDelivery
-from app.quotations import routes
+from app.models import Base, TelegramConnection, User
+from app.quotations import pdf_review, routes
+from app.quotations.pdf_review import QuotationPdfToken
 from app.quotations.tracking import QuotationRecordLink
 from app.quotations.service import QuotationService
 
@@ -20,6 +20,10 @@ def test_pdf_retry_only_uses_linked_draft(monkeypatch):
     sf = sessionmaker(bind=create_engine('sqlite://'))
     Base.metadata.create_all(sf.kw['bind'])
     with sf() as db:
+        db.add(User(id=1, tenant='fixture', database='db', odoo_uid=5,
+                    login='sale', name='Sale', active=True))
+        db.add(TelegramConnection(user_id=1, telegram_user_id=7, private_chat_id=7,
+                                  binding_id='fixture', status='connected'))
         db.add(QuotationRecordLink(user_id=1, operation_id='op_fixture', tenant='fixture',
             database='db', order_id=83, company_id=3))
         db.commit()
@@ -29,24 +33,33 @@ def test_pdf_retry_only_uses_linked_draft(monkeypatch):
     ctx = SimpleNamespace(user=SimpleNamespace(id=1, tenant='fixture', database='db', odoo_uid=5),
         service=SimpleNamespace(client=Mock()), secret='fixture')
     monkeypatch.setattr(routes, 'authenticated_context', lambda *args: nullcontext(ctx))
+    monkeypatch.setattr(QuotationService, '_companies', lambda self, company_id: (3, [3]))
     read = Mock(return_value={'id': 83, 'name': 'S00084', 'state': 'draft',
                               'write_date': '2026-11-16 12:00:00', 'company_id': [3, 'Company']})
-    monkeypatch.setattr(routes.QuotationService, '_readback', lambda self, *args: read(*args))
+    monkeypatch.setattr(pdf_review, '_read_order_for_token', lambda *args: read(*args))
     render = Mock(return_value=('S00084.pdf', b'%PDF-1.7\n%%EOF'))
-    monkeypatch.setattr('app.quotations.pdf.render_quotation_pdf', render)
+    monkeypatch.setattr(pdf_review, 'render_quotation_pdf', render)
     send = Mock(return_value={'message_id': 88})
-    monkeypatch.setattr('app.telegram.client.TelegramClient', lambda token: SimpleNamespace(send_document=send))
+    monkeypatch.setattr(pdf_review, 'TelegramClient', lambda token: SimpleNamespace(send_document=send))
     body = routes.PdfRetryRequest(telegram_user_id=7, chat_id=7, telegram_binding_id='fixture', order_id=83)
-    assert routes.retry_quotation_pdf(1, body, request)['status'] == 'sent'
-    read.assert_called_once_with(83, 3)
+    assert routes.pdf_retry(1, body, request)['status'] == 'sent'
+    read.assert_called_once_with(ctx, 83, 3)
     send.assert_called_once()
     native_request.assert_not_called()
     with sf() as db:
-        assert db.query(QuoteApprovalDelivery).count() == 0
+        assert db.query(QuotationPdfToken).filter_by(role='sale', message_id=88).count() == 1
+        assert db.query(QuotationPdfToken).filter_by(role='approver').count() == 0
     with pytest.raises(HTTPException) as error:
-        routes.retry_quotation_pdf(2, body, request)
+        routes.pdf_retry(2, body, request)
     assert error.value.status_code == 404
     assert read.call_count == 1
+    unlinked = routes.PdfRetryRequest(telegram_user_id=7, chat_id=7,
+                                     telegram_binding_id='fixture', order_id=84)
+    assert routes.pdf_retry(1, unlinked, request)['status'] == 'stale'
+    send.assert_called_once()
+    read.return_value = {**read.return_value, 'state': 'sale'}
+    assert routes.pdf_retry(1, body, request)['status'] == 'locked'
+    send.assert_called_once()
 
 
 def test_payment_term_lookup_resolves_only_unique_exact_match(monkeypatch):

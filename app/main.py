@@ -34,6 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         report_worker = None
         quote_worker = None
         quote_execution_worker = None
+        approval_sync_worker = None
         workspace_worker = None
         if settings.ENABLE_QUOTATIONS and settings.APP_ENV != 'test':
             from app.quotations.jobs import QuotePreparationWorker
@@ -42,6 +43,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from app.quotations.execution import QuoteExecutionWorker
             quote_execution_worker = QuoteExecutionWorker(settings, session_factory)
             quote_execution_worker.start()
+            if settings.ENABLE_QUOTATION_APPROVAL_SYNC:
+                from app.quotations.approval_sync import ApprovalSyncWorker
+                approval_sync_worker = ApprovalSyncWorker(settings, session_factory)
+                approval_sync_worker.start()
         if settings.ENABLE_REPORTING and settings.APP_ENV != "test":
             from app.reporting.worker import ReportWorker
             report_worker = ReportWorker(settings, session_factory)
@@ -170,6 +175,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             quote_worker.stop()
         if quote_execution_worker:
             quote_execution_worker.stop()
+        if approval_sync_worker:
+            approval_sync_worker.stop()
         if workspace_worker:
             await workspace_worker.stop()
         if settings.DRIVE_INDEX_ENABLED:

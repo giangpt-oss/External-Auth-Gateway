@@ -59,6 +59,8 @@ class TelegramService:
         self._crm_rate_limits: dict[int, list[datetime]] = {}
 
     def issue_link(self, user_id: int) -> TelegramLink:
+        if not re.fullmatch(r"[A-Za-z0-9_]+", self.bot_username):
+            raise ValueError("Telegram bot username is not configured")
         raw_token = generate_secure_token(24)
         token_hash = hash_token(raw_token)
         now = datetime.now(UTC)
@@ -66,6 +68,9 @@ class TelegramService:
 
         # Invalidate / delete old unused telegram_link tokens for this user
         with self.session_factory() as db:
+            target = db.query(User).filter_by(id=user_id, active=True).first()
+            if target is None:
+                raise ValueError("Odoo account is no longer active")
             db.query(LinkToken).filter(
                 LinkToken.user_id == user_id,
                 LinkToken.purpose == "telegram_link",
@@ -132,6 +137,9 @@ class TelegramService:
             or not text
             or chat.get("type") != "private"
             or from_user.get("is_bot", False)
+            or type(chat_id) is not int
+            or type(from_user.get("id")) is not int
+            or chat_id != from_user["id"]
         ):
             return {"status": "ignored", "reason": "Non-private or bot message"}
         if (re.fullmatch(r'/(?:quote_edit|quote_approve|quote_grant|quote_feedback)\s+[0-9a-f]{24}', text)
@@ -410,10 +418,19 @@ class TelegramService:
                 )
                 return
 
-            # 3. Mark token as used
-            lt.used_at = now
-            target_user = db.query(User).filter_by(id=lt.user_id).first()
+            target_user = db.query(User).filter_by(id=lt.user_id, active=True).first()
             if not target_user:
+                self.telegram_client.send_message(chat_id, "Tài khoản Odoo không còn hoạt động. Vui lòng đăng nhập lại.")
+                return
+            # Consume atomically: concurrent /start updates cannot both bind.
+            consumed = db.query(LinkToken).filter(
+                LinkToken.id == lt.id,
+                LinkToken.used_at.is_(None),
+                LinkToken.expires_at > now,
+            ).update({"used_at": now}, synchronize_session=False)
+            if consumed != 1:
+                db.rollback()
+                self.telegram_client.send_message(chat_id, "Mã liên kết đã được sử dụng. Hãy tạo mã mới trên Gateway.")
                 return
             target_user_name = target_user.name
 
